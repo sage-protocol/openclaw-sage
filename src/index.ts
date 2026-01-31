@@ -101,9 +101,9 @@ function toToolResult(mcpResult: unknown) {
 let bridge: McpBridge | null = null;
 
 const plugin = {
-  id: "sage-mcp",
+  id: "openclaw-sage",
   name: "Sage Protocol",
-  version: "0.1.0",
+  version: "0.1.2",
   description:
     "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations",
 
