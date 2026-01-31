@@ -1,0 +1,20 @@
+{
+  "id": "sage-mcp",
+  "uiHints": {
+    "sageBinary": {
+      "label": "Sage Binary Path",
+      "placeholder": "sage",
+      "help": "Path to sage CLI binary (auto-detected from PATH if empty)"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sageBinary": {
+        "type": "string",
+        "description": "Path to sage binary (default: auto-detect from PATH)"
+      }
+    }
+  }
+}
