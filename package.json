@@ -1,0 +1,24 @@
+{
+  "name": "@sage-protocol/openclaw-sage",
+  "version": "0.1.0",
+  "description": "Sage MCP bridge plugin for OpenClaw — prompt libraries, skills, governance, and on-chain operations",
+  "main": "src/index.ts",
+  "type": "module",
+  "openclaw": {
+    "id": "sage-mcp",
+    "displayName": "Sage Protocol",
+    "description": "MCP bridge for Sage prompt libraries, skills, and governance"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx src/mcp-bridge.test.ts"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0"
+  },
+  "license": "MIT"
+}
