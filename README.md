@@ -1,17 +1,19 @@
-# @sage-protocol/openclaw-sage
+# Sage Plugin (OpenClaw)
 
-Sage Protocol MCP bridge plugin for OpenClaw. Provides prompt libraries, skills, governance, and on-chain operations directly in OpenClaw sessions.
+MCP bridge plugin that exposes all Sage Protocol tools inside OpenClaw. Spawns the sage MCP server as a child process and translates JSON-RPC calls into registered OpenClaw tools.
+
+## What It Does
+
+- **MCP Tool Bridge** - Spawns `sage mcp start` and translates JSON-RPC tool calls into native OpenClaw tools
+- **Dynamic Registration** - Discovers available tools at startup and registers them with typed schemas
+- **RLM Capture** - Records prompt/response pairs for Sage's RLM feedback loop
+- **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
 
 ## Install
 
 ```bash
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
-
-## Requirements
-
-- [Sage CLI](https://github.com/sage-protocol/sage-cli) installed and available on PATH
-- OpenClaw v0.1.0+
 
 ## Configuration
 
@@ -25,13 +27,18 @@ The plugin auto-detects the `sage` binary from PATH. To override:
 
 ## What It Provides
 
-The plugin exposes Sage Protocol MCP tools inside OpenClaw:
+Once loaded, all Sage MCP tools are available in OpenClaw:
 
-- **Prompts & Libraries** — search, list, create, and manage prompt libraries
-- **Skills** — discover and activate skills from Sage Protocol, GitHub, or local sources
-- **Builder** — AI-powered prompt recommendations and synthesis
-- **Governance** — list DAOs, view proposals, check voting power
-- **Hub** — start/stop additional MCP servers (memory, brave-search, github, etc.)
+- **Prompts & Libraries** - Search, list, create, and manage prompt libraries
+- **Skills** - Discover and activate skills from Sage Protocol, GitHub, or local sources
+- **Builder** - AI-powered prompt recommendations and synthesis
+- **Governance** - List DAOs, view proposals, check voting power
+- **Hub** - Start/stop additional MCP servers (memory, brave-search, github, etc.)
+
+## Requirements
+
+- Sage CLI on PATH
+- OpenClaw v0.1.0+
 
 ## Development
 
