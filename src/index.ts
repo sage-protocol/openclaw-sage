@@ -1,6 +1,8 @@
 import { Type } from "@sinclair/typebox";
-
-import { spawn } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import TOML from "@iarna/toml";
 
 import { McpBridge, type McpToolDef } from "./mcp-bridge.js";
 
@@ -34,6 +36,21 @@ type PluginApi = {
     stop?: (ctx: PluginServiceContext) => void | Promise<void>;
   }) => void;
   on: (hook: string, handler: (...args: unknown[]) => void | Promise<void>) => void;
+};
+
+/** Custom server configuration from mcp-servers.toml */
+type CustomServerConfig = {
+  id: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  source: {
+    type: "npx" | "node" | "binary";
+    package?: string;
+    path?: string;
+  };
+  extra_args?: string[];
+  env?: Record<string, string>;
 };
 
 /**
@@ -98,205 +115,178 @@ function toToolResult(mcpResult: unknown) {
   };
 }
 
+/**
+ * Load custom server configurations from ~/.config/sage/mcp-servers.toml
+ */
+function loadCustomServers(): CustomServerConfig[] {
+  const configPath = join(homedir(), ".config", "sage", "mcp-servers.toml");
+
+  if (!existsSync(configPath)) {
+    return [];
+  }
+
+  try {
+    const content = readFileSync(configPath, "utf8");
+    const config = TOML.parse(content) as {
+      custom?: Record<string, {
+        id: string;
+        name: string;
+        description?: string;
+        enabled: boolean;
+        source: { type: string; package?: string; path?: string };
+        extra_args?: string[];
+        env?: Record<string, string>;
+      }>;
+    };
+
+    if (!config.custom) {
+      return [];
+    }
+
+    return Object.values(config.custom)
+      .filter((s) => s.enabled)
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        enabled: s.enabled,
+        source: {
+          type: s.source.type as "npx" | "node" | "binary",
+          package: s.source.package,
+          path: s.source.path,
+        },
+        extra_args: s.extra_args,
+        env: s.env,
+      }));
+  } catch (err) {
+    console.error(`Failed to parse mcp-servers.toml: ${err}`);
+    return [];
+  }
+}
+
+/**
+ * Create command and args for spawning an external server
+ */
+function getServerCommand(server: CustomServerConfig): { command: string; args: string[] } {
+  switch (server.source.type) {
+    case "npx":
+      return {
+        command: "npx",
+        args: ["-y", server.source.package!, ...(server.extra_args || [])],
+      };
+    case "node":
+      return {
+        command: "node",
+        args: [server.source.path!, ...(server.extra_args || [])],
+      };
+    case "binary":
+      return {
+        command: server.source.path!,
+        args: server.extra_args || [],
+      };
+    default:
+      throw new Error(`Unknown source type: ${server.source.type}`);
+  }
+}
+
 // ── Plugin Definition ────────────────────────────────────────────────────────
 
-let bridge: McpBridge | null = null;
-
-function extractText(input: unknown): string {
-  if (typeof input === "string") return input;
-  if (!input || typeof input !== "object") return "";
-
-  const obj = input as any;
-  const direct = [obj.text, obj.content, obj.prompt, obj.message, obj.input];
-  for (const c of direct) {
-    if (typeof c === "string" && c.trim()) return c.trim();
-  }
-
-  if (obj.message && typeof obj.message === "object") {
-    const msg = obj.message as any;
-    if (typeof msg.text === "string" && msg.text.trim()) return msg.text.trim();
-    if (typeof msg.content === "string" && msg.content.trim()) return msg.content.trim();
-  }
-
-  // Transcript-style: [{role, content}]
-  if (Array.isArray(obj.messages)) {
-    for (let i = obj.messages.length - 1; i >= 0; i--) {
-      const m = obj.messages[i];
-      if (!m || typeof m !== "object") continue;
-      const mm = m as any;
-      if (typeof mm.content === "string" && mm.content.trim()) return mm.content.trim();
-      if (typeof mm.text === "string" && mm.text.trim()) return mm.text.trim();
-      if (Array.isArray(mm.content)) {
-        const text = mm.content
-          .map((b: any) => (b?.type === "text" ? b?.text : ""))
-          .filter(Boolean)
-          .join("\n");
-        if (text.trim()) return text.trim();
-      }
-    }
-  }
-
-  return "";
-}
-
-function lastAssistantText(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
-  const obj = input as any;
-
-  const candidates = [obj.final, obj.output, obj.result, obj.response];
-  for (const c of candidates) {
-    const t = extractText(c);
-    if (t) return t;
-  }
-
-  if (Array.isArray(obj.messages)) {
-    for (let i = obj.messages.length - 1; i >= 0; i--) {
-      const m = obj.messages[i];
-      if (!m || typeof m !== "object") continue;
-      const mm = m as any;
-      if (mm.role === "assistant") {
-        const t = extractText(mm);
-        if (t) return t;
-      }
-    }
-  }
-
-  return "";
-}
-
-function toStringOrEmpty(v: unknown): string {
-  if (typeof v === "string") return v;
-  if (typeof v === "number") return String(v);
-  if (typeof v === "boolean") return v ? "1" : "0";
-  return "";
-}
-
-function fireAndForget(cmd: string, args: string[], env: Record<string, string>): void {
-  try {
-    const p = spawn(cmd, args, {
-      env: { ...process.env, ...env },
-      stdio: "ignore",
-      detached: true,
-    });
-    p.unref();
-  } catch {
-    // ignore
-  }
-}
+let sageBridge: McpBridge | null = null;
+const externalBridges: Map<string, McpBridge> = new Map();
 
 const plugin = {
   id: "openclaw-sage",
   name: "Sage Protocol",
-  version: "0.1.2",
+  version: "0.2.0",
   description:
-    "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations",
+    "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations (including external servers)",
 
   register(api: PluginApi) {
-    bridge = new McpBridge("sage", ["mcp", "start"]);
-
-    bridge.on("log", (line: string) => api.logger.info(`[sage-mcp] ${line}`));
-    bridge.on("error", (err: Error) => api.logger.error(`[sage-mcp] ${err.message}`));
-
-    // RLM capture hooks (derived data): attach prompt/response pairs with OpenClaw tags.
-    api.on("message_received", async (evt: unknown) => {
-      const prompt = extractText(evt);
-      if (!prompt) return;
-
-      const e = evt as any;
-      const sessionId =
-        toStringOrEmpty(e?.sessionId) ||
-        toStringOrEmpty(e?.sessionKey) ||
-        toStringOrEmpty(e?.context?.sessionId) ||
-        toStringOrEmpty(e?.context?.sessionKey);
-      const workspaceDir = toStringOrEmpty(e?.workspaceDir) || toStringOrEmpty(e?.context?.workspaceDir);
-
-      const attrs = {
-        openclaw: {
-          hook: "message_received",
-          sessionId: toStringOrEmpty(e?.sessionId) || toStringOrEmpty(e?.context?.sessionId),
-          sessionKey: toStringOrEmpty(e?.sessionKey) || toStringOrEmpty(e?.context?.sessionKey),
-          channel: toStringOrEmpty(e?.channel) || toStringOrEmpty(e?.context?.commandSource),
-          senderId: toStringOrEmpty(e?.senderId) || toStringOrEmpty(e?.context?.senderId),
-        },
-      };
-
-      fireAndForget("sage", ["capture", "hook", "prompt"], {
-        SAGE_SOURCE: "openclaw",
-        OPENCLAW: "1",
-        PROMPT: prompt,
-        SAGE_SESSION_ID: sessionId,
-        SAGE_WORKSPACE: workspaceDir,
-        SAGE_MODEL: toStringOrEmpty(e?.model) || toStringOrEmpty(e?.context?.model),
-        SAGE_PROVIDER: toStringOrEmpty(e?.provider) || toStringOrEmpty(e?.context?.provider),
-        SAGE_CAPTURE_ATTRIBUTES_JSON: JSON.stringify(attrs),
-      });
-    });
-
-    api.on("agent_end", async (evt: unknown) => {
-      const response = lastAssistantText(evt);
-      if (!response) return;
-
-      const e = evt as any;
-      const tokensIn =
-        toStringOrEmpty(e?.usage?.tokens_input) ||
-        toStringOrEmpty(e?.usage?.input_tokens) ||
-        toStringOrEmpty(e?.usage?.inputTokens);
-      const tokensOut =
-        toStringOrEmpty(e?.usage?.tokens_output) ||
-        toStringOrEmpty(e?.usage?.output_tokens) ||
-        toStringOrEmpty(e?.usage?.outputTokens);
-
-      fireAndForget("sage", ["capture", "hook", "response"], {
-        SAGE_SOURCE: "openclaw",
-        OPENCLAW: "1",
-        LAST_RESPONSE: response,
-        TOKENS_INPUT: tokensIn,
-        TOKENS_OUTPUT: tokensOut,
-      });
-    });
+    // Main sage MCP bridge
+    sageBridge = new McpBridge("sage", ["mcp", "start"]);
+    sageBridge.on("log", (line: string) => api.logger.info(`[sage-mcp] ${line}`));
+    sageBridge.on("error", (err: Error) => api.logger.error(`[sage-mcp] ${err.message}`));
 
     api.registerService({
       id: "sage-mcp-bridge",
       start: async (ctx) => {
         ctx.logger.info("Starting Sage MCP bridge...");
+
+        // Start the main sage bridge
         try {
-          await bridge!.start();
+          await sageBridge!.start();
           ctx.logger.info("Sage MCP bridge ready");
 
-          const tools = await bridge!.listTools();
-          ctx.logger.info(`Discovered ${tools.length} MCP tools`);
+          const tools = await sageBridge!.listTools();
+          ctx.logger.info(`Discovered ${tools.length} internal MCP tools`);
 
           for (const tool of tools) {
-            registerMcpTool(api, tool);
+            registerMcpTool(api, "sage", sageBridge!, tool);
           }
         } catch (err) {
           ctx.logger.error(
-            `Failed to start MCP bridge: ${err instanceof Error ? err.message : String(err)}`,
+            `Failed to start sage MCP bridge: ${err instanceof Error ? err.message : String(err)}`,
           );
+        }
+
+        // Load and start external servers
+        const customServers = loadCustomServers();
+        ctx.logger.info(`Found ${customServers.length} custom external servers`);
+
+        for (const server of customServers) {
+          try {
+            ctx.logger.info(`Starting external server: ${server.name} (${server.id})`);
+
+            const { command, args } = getServerCommand(server);
+            const bridge = new McpBridge(command, args, server.env);
+
+            bridge.on("log", (line: string) => ctx.logger.info(`[${server.id}] ${line}`));
+            bridge.on("error", (err: Error) => ctx.logger.error(`[${server.id}] ${err.message}`));
+
+            await bridge.start();
+            externalBridges.set(server.id, bridge);
+
+            const tools = await bridge.listTools();
+            ctx.logger.info(`[${server.id}] Discovered ${tools.length} tools`);
+
+            for (const tool of tools) {
+              registerMcpTool(api, server.id.replace(/-/g, "_"), bridge, tool);
+            }
+          } catch (err) {
+            ctx.logger.error(
+              `Failed to start ${server.name}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
         }
       },
       stop: async (ctx) => {
-        ctx.logger.info("Stopping Sage MCP bridge...");
-        await bridge?.stop();
+        ctx.logger.info("Stopping Sage MCP bridges...");
+
+        // Stop external bridges
+        for (const [id, bridge] of externalBridges) {
+          ctx.logger.info(`Stopping ${id}...`);
+          await bridge.stop();
+        }
+        externalBridges.clear();
+
+        // Stop main sage bridge
+        await sageBridge?.stop();
       },
     });
   },
 };
 
-function registerMcpTool(api: PluginApi, tool: McpToolDef) {
-  const name = `sage_${tool.name}`;
+function registerMcpTool(api: PluginApi, prefix: string, bridge: McpBridge, tool: McpToolDef) {
+  const name = `${prefix}_${tool.name}`;
   const schema = mcpSchemaToTypebox(tool.inputSchema);
 
   api.registerTool(
     {
       name,
-      label: `Sage: ${tool.name}`,
-      description: tool.description ?? `Sage MCP tool: ${tool.name}`,
+      label: `${prefix}: ${tool.name}`,
+      description: tool.description ?? `MCP tool: ${prefix}/${tool.name}`,
       parameters: schema,
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-        if (!bridge) {
-          return toToolResult({ error: "MCP bridge not initialized" });
-        }
         try {
           const result = await bridge.callTool(tool.name, params);
           return toToolResult(result);

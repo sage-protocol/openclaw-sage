@@ -45,6 +45,7 @@ export class McpBridge extends EventEmitter {
   constructor(
     private command: string,
     private args: string[],
+    private env?: Record<string, string>,
   ) {
     super();
   }
@@ -94,7 +95,7 @@ export class McpBridge extends EventEmitter {
     return new Promise((resolve, reject) => {
       const proc = spawn(this.command, this.args, {
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
+        env: { ...process.env, ...this.env },
       });
 
       proc.on("error", (err) => {
