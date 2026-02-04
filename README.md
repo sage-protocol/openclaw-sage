@@ -25,6 +25,30 @@ The plugin auto-detects the `sage` binary from PATH. To override:
 }
 ```
 
+### Auto-Inject / Auto-Suggest
+
+This plugin uses OpenClaw's plugin hook API to inject context at the start of each agent run (`before_agent_start`).
+
+Available config fields:
+
+```json
+{
+  "autoInjectContext": true,
+  "autoSuggestSkills": true,
+  "suggestLimit": 3,
+  "minPromptLen": 12,
+  "maxPromptBytes": 16384
+}
+```
+
+### Avoiding Double Injection
+
+If you also enabled Sage's OpenClaw *internal hook* (installed by `sage init --openclaw`), both the hook and this plugin can inject Sage context.
+
+- Recommended: keep the plugin injection on, and disable the internal hook injection via `SAGE_OPENCLAW_INJECT_CONTEXT=0` in your OpenClaw environment.
+
+The internal hook exists mainly for bootstrap-file injection; the plugin is the preferred place for per-run injection and suggestions.
+
 ## What It Provides
 
 Once loaded, all Sage MCP tools are available in OpenClaw:

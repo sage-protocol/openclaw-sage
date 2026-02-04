@@ -14,6 +14,26 @@
       "sageBinary": {
         "type": "string",
         "description": "Path to sage binary (default: auto-detect from PATH)"
+      },
+      "autoInjectContext": {
+        "type": "boolean",
+        "description": "Inject Sage tool context into the agent at start (default: true)"
+      },
+      "autoSuggestSkills": {
+        "type": "boolean",
+        "description": "Suggest relevant skills at agent start (default: true)"
+      },
+      "suggestLimit": {
+        "type": "number",
+        "description": "Max number of skill suggestions to include (default: 3)"
+      },
+      "minPromptLen": {
+        "type": "number",
+        "description": "Minimum prompt length before suggesting (default: 12)"
+      },
+      "maxPromptBytes": {
+        "type": "number",
+        "description": "Max prompt bytes forwarded to suggestion search (default: 16384)"
       }
     }
   }

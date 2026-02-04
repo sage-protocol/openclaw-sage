@@ -6,6 +6,32 @@ import TOML from "@iarna/toml";
 
 import { McpBridge, type McpToolDef } from "./mcp-bridge.js";
 
+const SAGE_CONTEXT = `## Sage MCP Tools Available
+
+You have access to Sage MCP tools for prompts, skills, and knowledge discovery.
+
+### Prompt Discovery
+- \`search_prompts\` - Hybrid keyword + semantic search for prompts
+- \`list_prompts\` - Browse prompts by source (local/onchain)
+- \`get_prompt\` - Get full prompt content by key
+- \`builder_recommend\` - AI-powered prompt suggestions based on intent
+
+### Skills
+- \`search_skills\` / \`list_skills\` - Find available skills
+- \`get_skill\` - Get skill details and content
+- \`use_skill\` - Activate a skill (auto-provisions required MCP servers)
+
+### External Tools (via Hub)
+- \`hub_list_servers\` - List available MCP servers (memory, github, brave, etc.)
+- \`hub_start_server\` - Start an MCP server to gain access to its tools
+- \`hub_status\` - Check which servers are currently running
+
+### Best Practices
+1. **Search before implementing** - Use \`search_prompts\` or \`builder_recommend\` to find existing solutions
+2. **Use skills for complex tasks** - Skills bundle prompts + MCP servers for specific workflows
+3. **Start additional servers as needed** - Use \`hub_start_server\` for memory, github, brave search, etc.
+4. **Check skill requirements** - Skills may require specific MCP servers; \`use_skill\` auto-provisions them`;
+
 /**
  * Minimal type stubs for OpenClaw plugin API.
  *
@@ -29,14 +55,90 @@ type PluginApi = {
   id: string;
   name: string;
   logger: PluginLogger;
+  pluginConfig?: Record<string, unknown>;
   registerTool: (tool: unknown, opts?: { name?: string; optional?: boolean }) => void;
   registerService: (service: {
     id: string;
     start: (ctx: PluginServiceContext) => void | Promise<void>;
     stop?: (ctx: PluginServiceContext) => void | Promise<void>;
   }) => void;
-  on: (hook: string, handler: (...args: unknown[]) => void | Promise<void>) => void;
+  on: (hook: string, handler: (...args: unknown[]) => unknown | Promise<unknown>) => void;
 };
+
+function clampInt(raw: unknown, def: number, min: number, max: number): number {
+  const n = typeof raw === "string" && raw.trim() ? Number(raw) : Number(raw);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+function truncateUtf8(s: string, maxBytes: number): string {
+  if (Buffer.byteLength(s, "utf8") <= maxBytes) return s;
+
+  let lo = 0;
+  let hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(s.slice(0, mid), "utf8") <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  return s.slice(0, lo);
+}
+
+function normalizePrompt(prompt: string, opts?: { maxBytes?: number }): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) return "";
+  const maxBytes = clampInt(opts?.maxBytes, 16_384, 512, 65_536);
+  return truncateUtf8(trimmed, maxBytes);
+}
+
+function extractJsonFromMcpResult(result: unknown): unknown {
+  const anyResult = result as any;
+  if (!anyResult || typeof anyResult !== "object") return undefined;
+
+  // Sage MCP tools typically return { content: [{ type: 'text', text: '...json...' }], isError?: bool }
+  const text =
+    Array.isArray(anyResult.content) && anyResult.content.length
+      ? anyResult.content
+          .map((c: any) => (c && typeof c.text === "string" ? c.text : ""))
+          .filter(Boolean)
+          .join("\n")
+      : undefined;
+
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+type SkillSearchResult = {
+  key?: string;
+  name?: string;
+  description?: string;
+  source?: string;
+  library?: string;
+  mcpServers?: string[];
+};
+
+function formatSkillSuggestions(results: SkillSearchResult[], limit: number): string {
+  const items = results
+    .filter((r) => r && typeof r.key === "string" && r.key.trim())
+    .slice(0, limit);
+  if (!items.length) return "";
+
+  const lines: string[] = [];
+  lines.push("## Suggested Skills");
+  lines.push("");
+  for (const r of items) {
+    const key = r.key!.trim();
+    const desc = typeof r.description === "string" ? r.description.trim() : "";
+    const origin = typeof r.library === "string" && r.library.trim() ? ` (from ${r.library.trim()})` : "";
+    const servers = Array.isArray(r.mcpServers) && r.mcpServers.length ? ` — requires: ${r.mcpServers.join(", ")}` : "";
+    lines.push(`- \`use_skill\` \`${key}\`${origin}${desc ? `: ${desc}` : ""}${servers}`);
+  }
+  return lines.join("\n");
+}
 
 /** Custom server configuration from mcp-servers.toml */
 type CustomServerConfig = {
@@ -202,8 +304,19 @@ const plugin = {
     "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations (including external servers)",
 
   register(api: PluginApi) {
+    const pluginCfg = api.pluginConfig ?? {};
+    const sageBinary = typeof pluginCfg.sageBinary === "string" && pluginCfg.sageBinary.trim()
+      ? pluginCfg.sageBinary.trim()
+      : "sage";
+
+    const autoInject = pluginCfg.autoInjectContext !== false;
+    const autoSuggest = pluginCfg.autoSuggestSkills !== false;
+    const suggestLimit = clampInt(pluginCfg.suggestLimit, 3, 1, 10);
+    const minPromptLen = clampInt(pluginCfg.minPromptLen, 12, 0, 500);
+    const maxPromptBytes = clampInt(pluginCfg.maxPromptBytes, 16_384, 512, 65_536);
+
     // Main sage MCP bridge - pass HOME to ensure auth state is found
-    sageBridge = new McpBridge("sage", ["mcp", "start"], {
+    sageBridge = new McpBridge(sageBinary, ["mcp", "start"], {
       HOME: homedir(),
       PATH: process.env.PATH || "",
       USER: process.env.USER || "",
@@ -279,6 +392,40 @@ const plugin = {
         await sageBridge?.stop();
       },
     });
+
+    // Auto-inject context and suggestions at agent start.
+    // This uses OpenClaw's plugin hook API (not internal hooks).
+    api.on("before_agent_start", async (event: any) => {
+      const prompt = normalizePrompt(typeof event?.prompt === "string" ? event.prompt : "", {
+        maxBytes: maxPromptBytes,
+      });
+      if (!prompt || prompt.length < minPromptLen) {
+        return autoInject ? { prependContext: SAGE_CONTEXT } : undefined;
+      }
+
+      let suggestBlock = "";
+      if (autoSuggest && sageBridge) {
+        try {
+          const raw = await sageBridge.callTool("search_skills", {
+            query: prompt,
+            source: "all",
+            limit: Math.max(20, suggestLimit),
+          });
+          const json = extractJsonFromMcpResult(raw) as any;
+          const results = Array.isArray(json?.results) ? (json.results as SkillSearchResult[]) : [];
+          suggestBlock = formatSkillSuggestions(results, suggestLimit);
+        } catch {
+          // Ignore suggestion failures; context injection should still work.
+        }
+      }
+
+      const parts: string[] = [];
+      if (autoInject) parts.push(SAGE_CONTEXT);
+      if (suggestBlock) parts.push(suggestBlock);
+
+      if (!parts.length) return undefined;
+      return { prependContext: parts.join("\n\n") };
+    });
   },
 };
 
@@ -308,3 +455,10 @@ function registerMcpTool(api: PluginApi, prefix: string, bridge: McpBridge, tool
 }
 
 export default plugin;
+
+export const __test = {
+  SAGE_CONTEXT,
+  normalizePrompt,
+  extractJsonFromMcpResult,
+  formatSkillSuggestions,
+};
