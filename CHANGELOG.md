@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.4...openclaw-sage-v0.1.5) (2026-02-04)
+
+
+### Features
+
+* suggestion improvements and hardening ([fb2c993](https://github.com/sage-protocol/openclaw-sage/commit/fb2c9930938c0552fdf29cedf57a2b24a52beb06))
+* update release for npmjs ([e8c5958](https://github.com/sage-protocol/openclaw-sage/commit/e8c59583365d31b213ca5640abadcba557bbbc31))
+
 ## [0.1.4](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.3...openclaw-sage-v0.1.4) (2026-02-04)
 
 
