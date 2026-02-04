@@ -41,6 +41,28 @@ Available config fields:
 }
 ```
 
+### Injection Guard (Opt-In)
+
+This plugin can optionally scan the agent prompt and fetched prompt content (e.g. from `sage_get_prompt`) for common prompt-injection / jailbreak patterns using Sage's built-in deterministic scanner.
+
+By default this is **off**.
+
+```json
+{
+  "injectionGuardEnabled": true,
+  "injectionGuardMode": "warn",
+  "injectionGuardScanAgentPrompt": true,
+  "injectionGuardScanGetPrompt": true,
+  "injectionGuardUsePromptGuard": false,
+  "injectionGuardMaxChars": 32768,
+  "injectionGuardIncludeEvidence": false
+}
+```
+
+Notes:
+- `injectionGuardMode=block` blocks `sage_get_prompt` results that are flagged, but cannot reliably abort the overall agent run (it injects a warning at start instead).
+- `injectionGuardUsePromptGuard` sends text to HuggingFace Prompt Guard if `SAGE_PROMPT_GUARD_API_KEY` is set; keep this off unless you explicitly want third-party scanning.
+
 ### Avoiding Double Injection
 
 If you also enabled Sage's OpenClaw *internal hook* (installed by `sage init --openclaw`), both the hook and this plugin can inject Sage context.

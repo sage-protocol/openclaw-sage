@@ -34,6 +34,35 @@
       "maxPromptBytes": {
         "type": "number",
         "description": "Max prompt bytes forwarded to suggestion search (default: 16384)"
+      },
+      "injectionGuardEnabled": {
+        "type": "boolean",
+        "description": "Enable prompt injection scanning (default: false)"
+      },
+      "injectionGuardMode": {
+        "type": "string",
+        "description": "Injection guard mode: warn or block (default: warn)",
+        "enum": ["warn", "block"]
+      },
+      "injectionGuardScanAgentPrompt": {
+        "type": "boolean",
+        "description": "Scan the agent's initial prompt in before_agent_start (default: true when enabled)"
+      },
+      "injectionGuardScanGetPrompt": {
+        "type": "boolean",
+        "description": "Scan sage_get_prompt results and warn/block (default: true when enabled)"
+      },
+      "injectionGuardUsePromptGuard": {
+        "type": "boolean",
+        "description": "Use HuggingFace Prompt Guard if configured (default: false)"
+      },
+      "injectionGuardMaxChars": {
+        "type": "number",
+        "description": "Max characters to scan (default: 32768)"
+      },
+      "injectionGuardIncludeEvidence": {
+        "type": "boolean",
+        "description": "Include evidence snippets in warnings (default: false)"
       }
     }
   }
