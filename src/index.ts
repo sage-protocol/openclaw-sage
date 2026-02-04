@@ -202,8 +202,14 @@ const plugin = {
     "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations (including external servers)",
 
   register(api: PluginApi) {
-    // Main sage MCP bridge
-    sageBridge = new McpBridge("sage", ["mcp", "start"]);
+    // Main sage MCP bridge - pass HOME to ensure auth state is found
+    sageBridge = new McpBridge("sage", ["mcp", "start"], {
+      HOME: homedir(),
+      PATH: process.env.PATH || "",
+      USER: process.env.USER || "",
+      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
+      XDG_DATA_HOME: process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+    });
     sageBridge.on("log", (line: string) => api.logger.info(`[sage-mcp] ${line}`));
     sageBridge.on("error", (err: Error) => api.logger.error(`[sage-mcp] ${err.message}`));
 
