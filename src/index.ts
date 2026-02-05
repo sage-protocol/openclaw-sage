@@ -1,31 +1,71 @@
-import { Type } from "@sinclair/typebox";
+import { Type, type TSchema } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import TOML from "@iarna/toml";
 
 import { McpBridge, type McpToolDef } from "./mcp-bridge.js";
 
+// Read version from package.json at module load time
+const __dirname_compat = dirname(fileURLToPath(import.meta.url));
+const PKG_VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(__dirname_compat, "..", "package.json"), "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 const SAGE_CONTEXT = `## Sage MCP Tools Available
 
-You have access to Sage MCP tools for prompts, skills, and knowledge discovery.
+You have access to Sage MCP tools for prompts, skills, governance, and on-chain operations.
 
 ### Prompt Discovery
 - \`search_prompts\` - Hybrid keyword + semantic search for prompts
 - \`list_prompts\` - Browse prompts by source (local/onchain)
 - \`get_prompt\` - Get full prompt content by key
 - \`builder_recommend\` - AI-powered prompt suggestions based on intent
+- \`builder_synthesize\` - Create new prompts from a description
 
 ### Skills
 - \`search_skills\` / \`list_skills\` - Find available skills
 - \`get_skill\` - Get skill details and content
 - \`use_skill\` - Activate a skill (auto-provisions required MCP servers)
+- \`sync_skills\` - Sync skills from daemon
+
+### Governance & DAOs
+- \`list_subdaos\` - List available DAOs
+- \`list_proposals\` / \`sage_list_governance_proposals\` - View proposals
+- \`sage_list_governance_votes\` - View vote breakdown
+- \`get_voting_power\` - Check voting power with NFT multipliers
+
+### Tips, Bounties & Marketplace
+- \`sage_list_tips\` / \`sage_list_tip_stats\` - Tips activity and stats
+- \`sage_list_bounties\` - Open/completed bounties
+- \`sage_list_bounty_library_additions\` - Pending library merges
+
+### Chat & Social
+- \`chat_list_rooms\` / \`chat_send\` / \`chat_history\` - Real-time messaging
+- Social follow/unfollow (via CLI)
+
+### RLM (Recursive Language Model)
+- \`rlm_stats\` - RLM statistics and capture counts
+- \`rlm_analyze_captures\` - Analyze captured prompt/response pairs
+- \`rlm_list_patterns\` - Show discovered patterns
+
+### Memory & Knowledge Graph
+- \`memory_create_entities\` / \`memory_search_nodes\` / \`memory_read_graph\` - Knowledge graph ops
 
 ### External Tools (via Hub)
 - \`hub_list_servers\` - List available MCP servers (memory, github, brave, etc.)
 - \`hub_start_server\` - Start an MCP server to gain access to its tools
 - \`hub_status\` - Check which servers are currently running
+
+### Plugin Status
+- \`sage_status\` - Check bridge health, connected network, wallet, and tool count
 
 ### Best Practices
 1. **Search before implementing** - Use \`search_prompts\` or \`builder_recommend\` to find existing solutions
@@ -186,6 +226,58 @@ type CustomServerConfig = {
 };
 
 /**
+ * Convert a single MCP JSON Schema property into a TypeBox type.
+ * Handles nested objects, typed arrays, and enums.
+ */
+function jsonSchemaToTypebox(prop: Record<string, unknown>): TSchema {
+  const desc = typeof prop.description === "string" ? prop.description : undefined;
+  const opts: Record<string, unknown> = {};
+  if (desc) opts.description = desc;
+
+  // Enum support: string enums become Type.Union of Type.Literal
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) {
+    const literals = prop.enum
+      .filter((v): v is string | number | boolean => ["string", "number", "boolean"].includes(typeof v))
+      .map((v) => Type.Literal(v));
+    if (literals.length > 0) {
+      return literals.length === 1 ? literals[0] : Type.Union(literals, opts);
+    }
+  }
+
+  switch (prop.type) {
+    case "number":
+    case "integer":
+      return Type.Number(opts);
+    case "boolean":
+      return Type.Boolean(opts);
+    case "array": {
+      // Typed array items
+      const items = prop.items as Record<string, unknown> | undefined;
+      const itemType = items && typeof items === "object" ? jsonSchemaToTypebox(items) : Type.Unknown();
+      return Type.Array(itemType, opts);
+    }
+    case "object": {
+      // Nested object with known properties
+      const nested = prop.properties as Record<string, Record<string, unknown>> | undefined;
+      if (nested && typeof nested === "object" && Object.keys(nested).length > 0) {
+        const nestedRequired = new Set(
+          Array.isArray(prop.required) ? (prop.required as string[]) : [],
+        );
+        const nestedFields: Record<string, TSchema> = {};
+        for (const [k, v] of Object.entries(nested)) {
+          const field = jsonSchemaToTypebox(v);
+          nestedFields[k] = nestedRequired.has(k) ? field : Type.Optional(field);
+        }
+        return Type.Object(nestedFields, { ...opts, additionalProperties: true });
+      }
+      return Type.Record(Type.String(), Type.Unknown(), opts);
+    }
+    default:
+      return Type.String(opts);
+  }
+}
+
+/**
  * Convert an MCP JSON Schema inputSchema into a TypeBox object schema
  * that OpenClaw's tool system accepts.
  */
@@ -199,35 +291,14 @@ function mcpSchemaToTypebox(inputSchema?: Record<string, unknown>) {
     Array.isArray(inputSchema.required) ? (inputSchema.required as string[]) : [],
   );
 
-  const fields: Record<string, unknown> = {};
+  const fields: Record<string, TSchema> = {};
 
   for (const [key, prop] of Object.entries(properties)) {
-    const desc = typeof prop.description === "string" ? prop.description : undefined;
-    const opts = desc ? { description: desc } : {};
-
-    let field: unknown;
-    switch (prop.type) {
-      case "number":
-      case "integer":
-        field = Type.Number(opts);
-        break;
-      case "boolean":
-        field = Type.Boolean(opts);
-        break;
-      case "array":
-        field = Type.Array(Type.Unknown(), opts);
-        break;
-      case "object":
-        field = Type.Record(Type.String(), Type.Unknown(), opts);
-        break;
-      default:
-        field = Type.String(opts);
-    }
-
-    fields[key] = required.has(key) ? field : Type.Optional(field as any);
+    const field = jsonSchemaToTypebox(prop);
+    fields[key] = required.has(key) ? field : Type.Optional(field);
   }
 
-  return Type.Object(fields as any, { additionalProperties: true });
+  return Type.Object(fields, { additionalProperties: true });
 }
 
 function toToolResult(mcpResult: unknown) {
@@ -329,7 +400,7 @@ const externalBridges: Map<string, McpBridge> = new Map();
 const plugin = {
   id: "openclaw-sage",
   name: "Sage Protocol",
-  version: "0.2.0",
+  version: PKG_VERSION,
   description:
     "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations (including external servers)",
 
@@ -338,6 +409,9 @@ const plugin = {
     const sageBinary = typeof pluginCfg.sageBinary === "string" && pluginCfg.sageBinary.trim()
       ? pluginCfg.sageBinary.trim()
       : "sage";
+    const sageProfile = typeof pluginCfg.sageProfile === "string" && pluginCfg.sageProfile.trim()
+      ? pluginCfg.sageProfile.trim()
+      : undefined;
 
     const autoInject = pluginCfg.autoInjectContext !== false;
     const autoSuggest = pluginCfg.autoSuggestSkills !== false;
@@ -395,13 +469,29 @@ const plugin = {
       }
     };
 
-    // Main sage MCP bridge - pass HOME to ensure auth state is found
-    sageBridge = new McpBridge(sageBinary, ["mcp", "start"], {
+    // Build env for sage subprocess — pass through auth/wallet state and profile config
+    const sageEnv: Record<string, string> = {
       HOME: homedir(),
       PATH: process.env.PATH || "",
       USER: process.env.USER || "",
       XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
       XDG_DATA_HOME: process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+    };
+    // Pass through Sage-specific env vars when set
+    const passthroughVars = [
+      "SAGE_PROFILE", "SAGE_PAY_TO_PIN", "SAGE_IPFS_WORKER_URL",
+      "SAGE_IPFS_UPLOAD_TOKEN", "SAGE_API_URL", "SAGE_HOME",
+      "KEYSTORE_PASSWORD", "SAGE_PROMPT_GUARD_API_KEY",
+    ];
+    for (const key of passthroughVars) {
+      if (process.env[key]) sageEnv[key] = process.env[key]!;
+    }
+    // Config-level profile override takes precedence
+    if (sageProfile) sageEnv.SAGE_PROFILE = sageProfile;
+
+    // Main sage MCP bridge
+    sageBridge = new McpBridge(sageBinary, ["mcp", "start"], sageEnv, {
+      clientVersion: PKG_VERSION,
     });
     sageBridge.on("log", (line: string) => api.logger.info(`[sage-mcp] ${line}`));
     sageBridge.on("error", (err: Error) => api.logger.error(`[sage-mcp] ${err.message}`));
@@ -426,6 +516,9 @@ const plugin = {
               scanText,
             });
           }
+
+          // Register sage_status meta-tool for bridge health reporting
+          registerStatusTool(api, tools.length);
         } catch (err) {
           ctx.logger.error(
             `Failed to start sage MCP bridge: ${err instanceof Error ? err.message : String(err)}`,
@@ -535,6 +628,81 @@ const plugin = {
   },
 };
 
+/** Map common error patterns to actionable hints */
+function enrichErrorMessage(err: Error, toolName: string): string {
+  const msg = err.message;
+
+  // Wallet not configured
+  if (/wallet|signer|no.*account|not.*connected/i.test(msg)) {
+    return `${msg}\n\nHint: Run \`sage wallet connect\` to configure a wallet, or set KEYSTORE_PASSWORD for automated flows.`;
+  }
+  // Auth / token issues
+  if (/auth|unauthorized|403|401|token.*expired|challenge/i.test(msg)) {
+    return `${msg}\n\nHint: Run \`sage ipfs setup\` to refresh authentication, or check SAGE_IPFS_UPLOAD_TOKEN.`;
+  }
+  // Network / RPC failures
+  if (/rpc|network|timeout|ECONNREFUSED|ENOTFOUND|fetch.*failed/i.test(msg)) {
+    return `${msg}\n\nHint: Check your network connection. Set SAGE_PROFILE to switch between testnet/mainnet.`;
+  }
+  // MCP bridge not running
+  if (/not running|not initialized|bridge stopped/i.test(msg)) {
+    return `${msg}\n\nHint: The Sage MCP bridge may have crashed. Try restarting the plugin or running \`sage mcp start\` to verify the CLI works.`;
+  }
+  // Credits
+  if (/credits|insufficient.*balance|IPFS.*balance/i.test(msg)) {
+    return `${msg}\n\nHint: Run \`sage ipfs faucet\` (testnet) or purchase credits via \`sage wallet buy\`.`;
+  }
+
+  return msg;
+}
+
+function registerStatusTool(api: PluginApi, sageToolCount: number) {
+  api.registerTool(
+    {
+      name: "sage_status",
+      label: "Sage: status",
+      description: "Check Sage plugin health: bridge connection, tool count, network profile, and wallet status",
+      parameters: Type.Object({}),
+      execute: async () => {
+        const bridgeReady = sageBridge?.isReady() ?? false;
+        const externalCount = externalBridges.size;
+        const externalIds = Array.from(externalBridges.keys());
+
+        // Try to get wallet + network info from sage
+        let walletInfo = "unknown";
+        let networkInfo = "unknown";
+        if (bridgeReady && sageBridge) {
+          try {
+            const ctx = await sageBridge.callTool("get_project_context", {});
+            const json = extractJsonFromMcpResult(ctx) as any;
+            if (json?.wallet?.address) walletInfo = json.wallet.address;
+            if (json?.network) networkInfo = json.network;
+          } catch {
+            // Not critical — report what we can
+          }
+        }
+
+        const status = {
+          pluginVersion: PKG_VERSION,
+          bridgeConnected: bridgeReady,
+          sageToolCount,
+          externalServerCount: externalCount,
+          externalServers: externalIds,
+          wallet: walletInfo,
+          network: networkInfo,
+          profile: process.env.SAGE_PROFILE || "default",
+        };
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
+          details: status,
+        };
+      },
+    },
+    { name: "sage_status", optional: true },
+  );
+}
+
 function registerMcpTool(
   api: PluginApi,
   prefix: string,
@@ -549,13 +717,26 @@ function registerMcpTool(
   const name = `${prefix}_${tool.name}`;
   const schema = mcpSchemaToTypebox(tool.inputSchema);
 
+  // Extract category from tool annotations if available
+  const category = typeof tool.annotations?.category === "string"
+    ? tool.annotations.category
+    : undefined;
+  const label = category
+    ? `${prefix}: ${category} / ${tool.name}`
+    : `${prefix}: ${tool.name}`;
+
   api.registerTool(
     {
       name,
-      label: `${prefix}: ${tool.name}`,
+      label,
       description: tool.description ?? `MCP tool: ${prefix}/${tool.name}`,
       parameters: schema,
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+        if (!bridge.isReady()) {
+          return toToolResult({
+            error: "MCP bridge not connected. The sage subprocess may have crashed — try restarting the plugin.",
+          });
+        }
         try {
           const result = await bridge.callTool(tool.name, params);
 
@@ -595,9 +776,11 @@ function registerMcpTool(
 
           return toToolResult(result);
         } catch (err) {
-          return toToolResult({
-            error: err instanceof Error ? err.message : String(err),
-          });
+          const enriched = enrichErrorMessage(
+            err instanceof Error ? err : new Error(String(err)),
+            tool.name,
+          );
+          return toToolResult({ error: enriched });
         }
       },
     },
@@ -608,8 +791,12 @@ function registerMcpTool(
 export default plugin;
 
 export const __test = {
+  PKG_VERSION,
   SAGE_CONTEXT,
   normalizePrompt,
   extractJsonFromMcpResult,
   formatSkillSuggestions,
+  mcpSchemaToTypebox,
+  jsonSchemaToTypebox,
+  enrichErrorMessage,
 };

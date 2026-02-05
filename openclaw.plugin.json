@@ -5,6 +5,11 @@
       "label": "Sage Binary Path",
       "placeholder": "sage",
       "help": "Path to sage CLI binary (auto-detected from PATH if empty)"
+    },
+    "sageProfile": {
+      "label": "Sage Profile",
+      "placeholder": "default",
+      "help": "Sage CLI profile name (e.g. testnet, mainnet). Maps to SAGE_PROFILE env var."
     }
   },
   "configSchema": {
@@ -14,6 +19,10 @@
       "sageBinary": {
         "type": "string",
         "description": "Path to sage binary (default: auto-detect from PATH)"
+      },
+      "sageProfile": {
+        "type": "string",
+        "description": "Sage CLI profile name to use (default: from SAGE_PROFILE env or 'default')"
       },
       "autoInjectContext": {
         "type": "boolean",

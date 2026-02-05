@@ -5,9 +5,12 @@ MCP bridge plugin that exposes all Sage Protocol tools inside OpenClaw. Spawns t
 ## What It Does
 
 - **MCP Tool Bridge** - Spawns `sage mcp start` and translates JSON-RPC tool calls into native OpenClaw tools
-- **Dynamic Registration** - Discovers available tools at startup and registers them with typed schemas
-- **RLM Capture** - Records prompt/response pairs for Sage's RLM feedback loop
+- **Dynamic Registration** - Discovers 60+ tools at startup and registers them with typed schemas
+- **Auto-Context Injection** - Injects Sage tool context and skill suggestions at agent start
+- **Error Context** - Enriches error messages with actionable hints (wallet, auth, network, credits)
+- **Injection Guard** - Optional prompt-injection scanning for fetched prompt content
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
+- **External Servers** - Loads additional MCP servers from `~/.config/sage/mcp-servers.toml`
 
 ## Install
 
@@ -21,9 +24,12 @@ The plugin auto-detects the `sage` binary from PATH. To override:
 
 ```json
 {
-  "sageBinary": "/path/to/sage"
+  "sageBinary": "/path/to/sage",
+  "sageProfile": "testnet"
 }
 ```
+
+The `sageProfile` field maps to `SAGE_PROFILE` and controls which network/wallet the CLI uses. The plugin also passes through these env vars when set: `SAGE_PROFILE`, `SAGE_PAY_TO_PIN`, `SAGE_IPFS_WORKER_URL`, `SAGE_API_URL`, `KEYSTORE_PASSWORD`.
 
 ### Auto-Inject / Auto-Suggest
 
@@ -73,17 +79,60 @@ The internal hook exists mainly for bootstrap-file injection; the plugin is the 
 
 ## What It Provides
 
-Once loaded, all Sage MCP tools are available in OpenClaw:
+Once loaded, all Sage MCP tools are available in OpenClaw with a `sage_` prefix:
 
-- **Prompts & Libraries** - Search, list, create, and manage prompt libraries
-- **Skills** - Discover and activate skills from Sage Protocol, GitHub, or local sources
-- **Builder** - AI-powered prompt recommendations and synthesis
-- **Governance** - List DAOs, view proposals, check voting power
-- **Hub** - Start/stop additional MCP servers (memory, brave-search, github, etc.)
+### Prompts & Libraries
+- `sage_search_prompts` - Hybrid keyword + semantic search
+- `sage_list_prompts` - Browse prompts by source
+- `sage_get_prompt` - Full prompt content
+- `sage_quick_create_prompt` - Create new prompts
+- `sage_list_libraries` - Local/on-chain libraries
+
+### Skills
+- `sage_search_skills` / `sage_list_skills` - Find skills
+- `sage_get_skill` - Skill details and content
+- `sage_use_skill` - Activate a skill (auto-provisions MCP servers)
+- `sage_sync_skills` - Sync from daemon
+
+### Builder
+- `sage_builder_recommend` - AI-powered prompt suggestions
+- `sage_builder_synthesize` - Synthesize from intent
+- `sage_builder_vote` - Feedback on recommendations
+
+### Governance & DAOs
+- `sage_list_subdaos` - List available DAOs
+- `sage_list_proposals` / `sage_list_governance_proposals` - View proposals
+- `sage_list_governance_votes` - Vote breakdown
+- `sage_get_voting_power` - Voting power with NFT multipliers
+
+### Tips, Bounties & Marketplace
+- `sage_list_tips` / `sage_list_tip_stats` - Tips activity and stats
+- `sage_list_bounties` - Open/completed bounties
+- `sage_list_bounty_library_additions` - Pending library merges
+
+### Chat & Social
+- `sage_chat_list_rooms` / `sage_chat_send` / `sage_chat_history` - Real-time messaging
+
+### RLM (Recursive Language Model)
+- `sage_rlm_stats` - Statistics and capture counts
+- `sage_rlm_analyze_captures` - Analyze captured data
+- `sage_rlm_list_patterns` - Discovered patterns
+
+### Memory & Knowledge Graph
+- `sage_memory_create_entities` / `sage_memory_search_nodes` / `sage_memory_read_graph`
+
+### Hub (External MCP Servers)
+- `sage_hub_list_servers` - List available MCP servers
+- `sage_hub_start_server` - Start a server
+- `sage_hub_stop_server` - Stop a server
+- `sage_hub_status` - Check running servers
+
+### Plugin Meta
+- `sage_status` - Bridge health, wallet, network, tool count
 
 ## Requirements
 
-- Sage CLI on PATH
+- Sage CLI on PATH (v0.9.16+)
 - OpenClaw v0.1.0+
 
 ## Development

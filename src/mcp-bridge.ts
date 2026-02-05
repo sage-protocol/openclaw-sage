@@ -8,6 +8,8 @@ export type McpToolDef = {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
+  /** Tool category (from Sage MCP registry) */
+  annotations?: Record<string, unknown>;
 };
 
 /** JSON-RPC request/response types */
@@ -42,12 +44,21 @@ export class McpBridge extends EventEmitter {
   private retries = 0;
   private stopped = false;
 
+  private clientVersion: string;
+
   constructor(
     private command: string,
     private args: string[],
     private env?: Record<string, string>,
+    opts?: { clientVersion?: string },
   ) {
     super();
+    this.clientVersion = opts?.clientVersion ?? "0.0.0";
+  }
+
+  /** Whether the bridge is connected and ready for requests */
+  isReady(): boolean {
+    return this.ready && this.proc !== null && !this.stopped;
   }
 
   async start(): Promise<void> {
@@ -133,7 +144,7 @@ export class McpBridge extends EventEmitter {
     const result = (await this.request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "openclaw-sage-plugin", version: "0.1.0" },
+      clientInfo: { name: "openclaw-sage-plugin", version: this.clientVersion },
     })) as { serverInfo?: { name?: string } };
 
     this.notify("notifications/initialized", {});
