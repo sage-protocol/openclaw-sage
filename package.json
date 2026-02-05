@@ -1,6 +1,6 @@
 {
   "name": "@sage-protocol/openclaw-sage",
-  "version": "0.2.0",
+  "version": "0.1.6",
   "description": "Sage MCP bridge plugin for OpenClaw — prompt libraries, skills, governance, and on-chain operations",
   "main": "src/index.ts",
   "type": "module",

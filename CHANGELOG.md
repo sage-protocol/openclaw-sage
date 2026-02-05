@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.5...openclaw-sage-v0.1.6) (2026-02-05)
+
+
+### Features
+
+* P0-P2 fixes — version sync, schema conversion, env passthrough, status tool, error enrichment ([5e2d6f4](https://github.com/sage-protocol/openclaw-sage/commit/5e2d6f4ab468d53cf9bf36d504cde1b32ed801f3))
+
 ## [0.1.5](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.4...openclaw-sage-v0.1.5) (2026-02-04)
 
 
