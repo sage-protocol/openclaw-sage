@@ -432,6 +432,14 @@ const plugin = {
     const injectionGuardMaxChars = clampInt(pluginCfg.injectionGuardMaxChars, 32_768, 256, 200_000);
     const injectionGuardIncludeEvidence = injectionGuardEnabled && pluginCfg.injectionGuardIncludeEvidence === true;
 
+    // Soul stream sync: read locally-synced soul document if configured
+    const soulStreamDao = typeof pluginCfg.soulStreamDao === "string" && pluginCfg.soulStreamDao.trim()
+      ? pluginCfg.soulStreamDao.trim().toLowerCase()
+      : "";
+    const soulStreamLibraryId = typeof pluginCfg.soulStreamLibraryId === "string" && pluginCfg.soulStreamLibraryId.trim()
+      ? pluginCfg.soulStreamLibraryId.trim()
+      : "soul";
+
     const scanCache = new Map<string, { ts: number; scan: SecurityScanResult }>();
     const SCAN_CACHE_LIMIT = 256;
     const SCAN_CACHE_TTL_MS = 5 * 60_000;
@@ -594,8 +602,23 @@ const plugin = {
         }
       }
 
+      // Read locally-synced soul document (written by `sync_library_stream` tool)
+      let soulContent = "";
+      if (soulStreamDao) {
+        const xdgData = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+        const soulPath = join(xdgData, "sage", "souls", `${soulStreamDao}-${soulStreamLibraryId}.md`);
+        try {
+          if (existsSync(soulPath)) {
+            soulContent = readFileSync(soulPath, "utf8").trim();
+          }
+        } catch {
+          // Soul file unreadable — skip silently
+        }
+      }
+
       if (!prompt || prompt.length < minPromptLen) {
         const parts: string[] = [];
+        if (soulContent) parts.push(soulContent);
         if (autoInject) parts.push(SAGE_CONTEXT);
         if (guardNotice) parts.push(guardNotice);
         return parts.length ? { prependContext: parts.join("\n\n") } : undefined;
@@ -618,6 +641,7 @@ const plugin = {
       }
 
       const parts: string[] = [];
+      if (soulContent) parts.push(soulContent);
       if (autoInject) parts.push(SAGE_CONTEXT);
       if (guardNotice) parts.push(guardNotice);
       if (suggestBlock) parts.push(suggestBlock);
