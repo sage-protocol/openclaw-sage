@@ -10,6 +10,16 @@
       "label": "Sage Profile",
       "placeholder": "default",
       "help": "Sage CLI profile name (e.g. testnet, mainnet). Maps to SAGE_PROFILE env var."
+    },
+    "soulStreamDao": {
+      "label": "Soul Stream DAO",
+      "placeholder": "0x...",
+      "help": "Optional SubDAO address for local soul stream context injection."
+    },
+    "soulStreamLibraryId": {
+      "label": "Soul Stream Library ID",
+      "placeholder": "soul",
+      "help": "Optional library ID used when reading soul stream markdown (default: soul)."
     }
   },
   "configSchema": {
@@ -23,6 +33,14 @@
       "sageProfile": {
         "type": "string",
         "description": "Sage CLI profile name to use (default: from SAGE_PROFILE env or 'default')"
+      },
+      "soulStreamDao": {
+        "type": "string",
+        "description": "Optional SubDAO address to read synced soul stream context from ~/.local/share/sage/souls."
+      },
+      "soulStreamLibraryId": {
+        "type": "string",
+        "description": "Soul stream library ID suffix (default: soul)."
       },
       "autoInjectContext": {
         "type": "boolean",

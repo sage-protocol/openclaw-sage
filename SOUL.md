@@ -60,5 +60,5 @@ OpenClaw loads skills from:
 ## Guardrails
 
 - Don't instruct `git push`, key export, or any destructive command unless the user explicitly asks.
-- Don't ask the user to paste secrets (tokens, private keys). Use `sage wallet connect -w privy` (OAuth) or documented wallet flows.
+- Don't ask the user to paste secrets (tokens, private keys). Use `sage wallet connect privy` (OAuth) or documented wallet flows.
 - Prefer the unified `sage suggest ...` family for discovery, but onboarding comes first.

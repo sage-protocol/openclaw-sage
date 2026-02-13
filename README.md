@@ -47,6 +47,19 @@ Available config fields:
 }
 ```
 
+### Soul Stream Context (Optional)
+
+You can prepend a locally synced DAO soul stream document to each run by setting:
+
+```json
+{
+  "soulStreamDao": "0xabc123...",
+  "soulStreamLibraryId": "soul"
+}
+```
+
+This reads `~/.local/share/sage/souls/<subdao>-<libraryId>.md` when present.
+
 ### Injection Guard (Opt-In)
 
 This plugin can optionally scan the agent prompt and fetched prompt content (e.g. from `sage_get_prompt`) for common prompt-injection / jailbreak patterns using Sage's built-in deterministic scanner.
@@ -71,7 +84,7 @@ Notes:
 
 ### Avoiding Double Injection
 
-If you also enabled Sage's OpenClaw *internal hook* (installed by `sage init --openclaw`), both the hook and this plugin can inject Sage context.
+If you also enabled Sage's OpenClaw *internal hook* (installed by `sage init`), both the hook and this plugin can inject Sage context.
 
 - Recommended: keep the plugin injection on, and disable the internal hook injection via `SAGE_OPENCLAW_INJECT_CONTEXT=0` in your OpenClaw environment.
 

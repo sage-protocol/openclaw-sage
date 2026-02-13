@@ -658,11 +658,11 @@ function enrichErrorMessage(err: Error, toolName: string): string {
 
   // Wallet not configured
   if (/wallet|signer|no.*account|not.*connected/i.test(msg)) {
-    return `${msg}\n\nHint: Run \`sage wallet connect\` to configure a wallet, or set KEYSTORE_PASSWORD for automated flows.`;
+    return `${msg}\n\nHint: Run \`sage wallet connect privy\` (or \`sage wallet connect\`) to configure a wallet, or set KEYSTORE_PASSWORD for automated flows.`;
   }
   // Auth / token issues
   if (/auth|unauthorized|403|401|token.*expired|challenge/i.test(msg)) {
-    return `${msg}\n\nHint: Run \`sage ipfs setup\` to refresh authentication, or check SAGE_IPFS_UPLOAD_TOKEN.`;
+    return `${msg}\n\nHint: Run \`sage config ipfs setup\` to refresh authentication (legacy: \`sage ipfs setup\`), or check SAGE_IPFS_UPLOAD_TOKEN.`;
   }
   // Network / RPC failures
   if (/rpc|network|timeout|ECONNREFUSED|ENOTFOUND|fetch.*failed/i.test(msg)) {
@@ -674,7 +674,7 @@ function enrichErrorMessage(err: Error, toolName: string): string {
   }
   // Credits
   if (/credits|insufficient.*balance|IPFS.*balance/i.test(msg)) {
-    return `${msg}\n\nHint: Run \`sage ipfs faucet\` (testnet) or purchase credits via \`sage wallet buy\`.`;
+    return `${msg}\n\nHint: Run \`sage config ipfs faucet\` (testnet; legacy: \`sage ipfs faucet\`) or purchase credits via \`sage wallet buy\`.`;
   }
 
   return msg;

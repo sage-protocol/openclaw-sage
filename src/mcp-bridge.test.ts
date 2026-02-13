@@ -1,18 +1,49 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 import { McpBridge } from "./mcp-bridge.js";
 import plugin from "./index.js";
 import { __test } from "./index.js";
 
+function candidateSageDebugBinDirs(): string[] {
+  const here = resolve(new URL("..", import.meta.url).pathname);
+  const candidates = [
+    // Monorepo layout: packages/openclaw-sage and packages/sage
+    resolve(here, "..", "sage", "target", "debug"),
+    // Legacy layout fallback
+    resolve(here, "..", "target", "debug"),
+  ];
+  return [...new Set(candidates.filter((dir) => existsSync(dir)))];
+}
+
+function resolveSageBinaryForTests(): string {
+  const override = process.env.SAGE_BIN_TEST || process.env.SAGE_BIN;
+  if (override && override.trim()) return override.trim();
+
+  const exe = process.platform === "win32" ? "sage.exe" : "sage";
+  for (const dir of candidateSageDebugBinDirs()) {
+    const candidate = resolve(dir, exe);
+    if (existsSync(candidate)) return candidate;
+  }
+  // Fallback to PATH
+  return "sage";
+}
+
+function canExecuteSage(bin: string): boolean {
+  const probe = spawnSync(bin, ["--version"], { stdio: "ignore" });
+  return probe.status === 0;
+}
+
 function addSageDebugBinToPath() {
-  // Ensure the `sage` binary used by the plugin resolves to this repo's build.
-  const binDir = resolve(new URL("..", import.meta.url).pathname, "..", "target", "debug");
+  // Ensure the `sage` binary used by the plugin resolves to this repo's build first.
+  const dirs = candidateSageDebugBinDirs();
+  if (!dirs.length) return { binDir: undefined };
   const sep = process.platform === "win32" ? ";" : ":";
-  process.env.PATH = `${binDir}${sep}${process.env.PATH ?? ""}`;
-  return { binDir };
+  process.env.PATH = `${dirs.join(sep)}${sep}${process.env.PATH ?? ""}`;
+  return { binDir: dirs[0] };
 }
 
 // ── P0: Version consistency ──────────────────────────────────────────
@@ -115,7 +146,7 @@ test("enrichErrorMessage adds wallet hint for wallet errors", () => {
 test("enrichErrorMessage adds auth hint for auth errors", () => {
   const err = new Error("401 Unauthorized: token expired");
   const enriched = __test.enrichErrorMessage(err, "ipfs_upload");
-  assert.ok(enriched.includes("sage ipfs setup"), "should suggest ipfs setup");
+  assert.ok(enriched.includes("sage config ipfs setup"), "should suggest config ipfs setup");
 });
 
 test("enrichErrorMessage adds network hint for RPC errors", () => {
@@ -133,7 +164,7 @@ test("enrichErrorMessage adds bridge hint for bridge errors", () => {
 test("enrichErrorMessage adds credits hint for balance errors", () => {
   const err = new Error("Insufficient IPFS balance");
   const enriched = __test.enrichErrorMessage(err, "ipfs_pin");
-  assert.ok(enriched.includes("sage ipfs faucet"), "should suggest faucet");
+  assert.ok(enriched.includes("sage config ipfs faucet"), "should suggest config ipfs faucet");
 });
 
 test("enrichErrorMessage passes through unknown errors", () => {
@@ -156,11 +187,15 @@ test("SAGE_CONTEXT includes all major tool categories", () => {
 
 // ── Existing tests (integration — require sage binary) ───────────────
 
-test("McpBridge can initialize, list tools, and call a native tool", async () => {
-  const sageBin = resolve(new URL("..", import.meta.url).pathname, "..", "target", "debug", "sage");
+test("McpBridge can initialize, list tools, and call a native tool", async (t) => {
+  const sageBin = resolveSageBinaryForTests();
+  if (!canExecuteSage(sageBin)) {
+    t.skip(`sage binary not available for integration test: ${sageBin}`);
+    return;
+  }
   const bridge = new McpBridge(sageBin, ["mcp", "start"]);
-  await bridge.start();
   try {
+    await bridge.start();
     assert.ok(bridge.isReady(), "bridge should be ready after start");
     const tools = await bridge.listTools();
     assert.ok(Array.isArray(tools));
@@ -172,7 +207,7 @@ test("McpBridge can initialize, list tools, and call a native tool", async () =>
     const result = await bridge.callTool("get_project_context", {});
     assert.ok(result && typeof result === "object");
   } finally {
-    await bridge.stop();
+    await bridge.stop().catch(() => {});
     assert.ok(!bridge.isReady(), "bridge should not be ready after stop");
   }
 });
