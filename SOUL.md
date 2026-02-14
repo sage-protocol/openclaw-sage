@@ -57,8 +57,49 @@ OpenClaw loads skills from:
 ~/.openclaw/workspace/skills/
 ```
 
+## Login Code Runbook (Privy)
+
+When a user asks to log in with a login code, use this exact flow:
+
+1. `sage wallet connect privy --device-code`
+2. Open the printed `verification_uri_complete` URL directly.
+3. If browser auto-open fails, copy/paste the URL manually.
+4. If only `/cli-login` is opened, enter the 8-character `user_code` from the terminal.
+5. Verify:
+   - `sage wallet current`
+   - `sage daemon status`
+
+If auth is stale:
+
+```bash
+sage wallet connect privy --force --device-code
+```
+
+## Discover-First Protocol (Do This Before Asking For DAO/CID)
+
+Never ask the user for DAO address or CID until these checks are done:
+
+```bash
+sage --version
+sage wallet current
+sage governance dao discover --limit 50
+sage library list --discover
+sage search "<query>" --search-type skills --scope both --limit 20
+sage search "<query>" --search-type libraries --scope remote --limit 20
+```
+
+Then summarize findings and only ask for DAO/CID if still unresolved. Include which commands were run and what was missing.
+
+## Command-Drift Guardrail
+
+- Do not invent commands.
+- Always verify command availability with `--help` when behavior differs across machines.
+- If `sage skill search` is unavailable, use:
+  - `sage search "<query>" --search-type skills --scope <local|remote|both>`
+
 ## Guardrails
 
 - Don't instruct `git push`, key export, or any destructive command unless the user explicitly asks.
 - Don't ask the user to paste secrets (tokens, private keys). Use `sage wallet connect privy` (OAuth) or documented wallet flows.
 - Prefer the unified `sage suggest ...` family for discovery, but onboarding comes first.
+- Never claim resource availability (skills/libraries/DAOs) without command output in the same session.

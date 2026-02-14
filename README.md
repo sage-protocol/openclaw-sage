@@ -31,6 +31,44 @@ The plugin auto-detects the `sage` binary from PATH. To override:
 
 The `sageProfile` field maps to `SAGE_PROFILE` and controls which network/wallet the CLI uses. The plugin also passes through these env vars when set: `SAGE_PROFILE`, `SAGE_PAY_TO_PIN`, `SAGE_IPFS_WORKER_URL`, `SAGE_API_URL`, `KEYSTORE_PASSWORD`.
 
+### Login With Code (Privy Device-Code)
+
+If browser OAuth is unreliable, use:
+
+```bash
+sage wallet connect privy --device-code
+```
+
+The CLI prints:
+- `verification_uri_complete` (open this first)
+- `verification_uri` + `user_code` (manual fallback)
+
+Verify connection:
+
+```bash
+sage wallet current
+sage daemon status
+```
+
+Refresh stale sessions:
+
+```bash
+sage wallet connect privy --force --device-code
+```
+
+### Discovery Workflow (Avoid DAO/CID Dead-Ends)
+
+Before asking users for DAO/CID, run:
+
+```bash
+sage governance dao discover --limit 50
+sage library list --discover
+sage search "<query>" --search-type skills --scope both --limit 20
+sage search "<query>" --search-type libraries --scope remote --limit 20
+```
+
+If command surface differs across machines, verify with `sage --help` / `sage skill --help` and adapt.
+
 ### Auto-Inject / Auto-Suggest
 
 This plugin uses OpenClaw's plugin hook API to inject context at the start of each agent run (`before_agent_start`).

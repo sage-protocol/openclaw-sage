@@ -71,7 +71,9 @@ You have access to Sage MCP tools for prompts, skills, governance, and on-chain 
 1. **Search before implementing** - Use \`search_prompts\` or \`builder_recommend\` to find existing solutions
 2. **Use skills for complex tasks** - Skills bundle prompts + MCP servers for specific workflows
 3. **Start additional servers as needed** - Use \`hub_start_server\` for memory, github, brave search, etc.
-4. **Check skill requirements** - Skills may require specific MCP servers; \`use_skill\` auto-provisions them`;
+4. **Check skill requirements** - Skills may require specific MCP servers; \`use_skill\` auto-provisions them
+5. **Discover before asking for DAO/CID** - Run \`list_subdaos\`, \`list_libraries\`, and \`search_skills\` first; only ask user for address/CID if unresolved
+6. **Privy login-code fallback** - If auth is stale, use \`sage wallet connect privy --force --device-code\`, then verify with \`sage wallet current\``;
 
 /**
  * Minimal type stubs for OpenClaw plugin API.
@@ -660,9 +662,16 @@ function enrichErrorMessage(err: Error, toolName: string): string {
   if (/wallet|signer|no.*account|not.*connected/i.test(msg)) {
     return `${msg}\n\nHint: Run \`sage wallet connect privy\` (or \`sage wallet connect\`) to configure a wallet, or set KEYSTORE_PASSWORD for automated flows.`;
   }
+  // Privy session/auth issues
+  if (/privy|session.*expired|re-authenticate|wallet session expired/i.test(msg)) {
+    return `${msg}\n\nHint: Reconnect with login-code flow:\n  \`sage wallet connect privy --force --device-code\`\nThen verify:\n  \`sage wallet current\`\n  \`sage daemon status\``;
+  }
   // Auth / token issues
   if (/auth|unauthorized|403|401|token.*expired|challenge/i.test(msg)) {
-    return `${msg}\n\nHint: Run \`sage config ipfs setup\` to refresh authentication (legacy: \`sage ipfs setup\`), or check SAGE_IPFS_UPLOAD_TOKEN.`;
+    if (/ipfs|upload token|pin|credits/i.test(msg) || /ipfs|upload|pin|credit/i.test(toolName)) {
+      return `${msg}\n\nHint: Run \`sage config ipfs setup\` to refresh authentication, or check SAGE_IPFS_UPLOAD_TOKEN.`;
+    }
+    return `${msg}\n\nHint: Reconnect wallet auth with:\n  \`sage wallet connect privy --force --device-code\``;
   }
   // Network / RPC failures
   if (/rpc|network|timeout|ECONNREFUSED|ENOTFOUND|fetch.*failed/i.test(msg)) {
