@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.7](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.6...openclaw-sage-v0.1.7) (2026-02-14)
+
+
+### Features
+
+* read locally-synced soul document at agent start ([edbfb0d](https://github.com/sage-protocol/openclaw-sage/commit/edbfb0ddd84fc4cac4a6a59d422b70aff61b1cb1))
+
+
+### Bug Fixes
+
+* align OpenClaw plugin with current sage CLI and harden tests ([3b8f92f](https://github.com/sage-protocol/openclaw-sage/commit/3b8f92f45f8993c440259921993d9b77978bba19))
+
 ## [0.1.6](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.5...openclaw-sage-v0.1.6) (2026-02-05)
 
 
