@@ -5,15 +5,12 @@ MCP bridge plugin that exposes all Sage Protocol tools inside OpenClaw. Spawns t
 ## What It Does
 
 - **MCP Tool Bridge** - Spawns `sage mcp start` and translates JSON-RPC tool calls into native OpenClaw tools
-- **Dynamic Registration** - Discovers 60+ tools at startup and registers them with typed schemas
 - **Auto-Context Injection** - Injects Sage tool context and skill suggestions at agent start
-- **Error Context** - Enriches error messages with actionable hints (wallet, auth, network, credits)
 - **Injection Guard** - Optional prompt-injection scanning for fetched prompt content
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
 - **External Servers** - Loads additional MCP servers from `~/.config/sage/mcp-servers.toml`
 
 ## Install
-
 ```bash
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
@@ -21,61 +18,17 @@ openclaw plugins install @sage-protocol/openclaw-sage
 After install, **restart the Gateway** for the plugin to take effect.
 
 ### Verify
-
 ```bash
 openclaw plugins list
 openclaw plugins info openclaw-sage
 ```
 
-### Configure
-
-Plugin settings go under `plugins.entries.openclaw-sage.config` in your OpenClaw config file. Restart the Gateway after any config change.
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "openclaw-sage": {
-        "enabled": true,
-        "config": {
-          "sageBinary": "/path/to/sage",
-          "sageProfile": "testnet"
-        }
-      }
-    }
-  }
-}
-```
-
-All keys are optional — `sageBinary` and `sageProfile` default to auto-detect and `default` respectively. See [Configuration](#configuration) below for the full list.
-
 ### Update
-
 ```bash
 openclaw plugins update openclaw-sage
 # or update all plugins at once
 openclaw plugins update --all
 ```
-
-### Development Install (local linking)
-
-```bash
-openclaw plugins install -l ./path/to/openclaw-sage
-```
-
-## Configuration
-
-The plugin auto-detects the `sage` binary from PATH. To override:
-
-```json
-{
-  "sageBinary": "/path/to/sage",
-  "sageProfile": "testnet"
-}
-```
-
-The `sageProfile` field maps to `SAGE_PROFILE` and controls which network/wallet the CLI uses. The plugin also passes through these env vars when set: `SAGE_PROFILE`, `SAGE_PAY_TO_PIN`, `SAGE_IPFS_WORKER_URL`, `SAGE_API_URL`, `KEYSTORE_PASSWORD`.
-
 ### Login With Code (Privy Device-Code)
 
 If browser OAuth is unreliable, use:
