@@ -18,6 +18,51 @@ MCP bridge plugin that exposes all Sage Protocol tools inside OpenClaw. Spawns t
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
 
+After install, **restart the Gateway** for the plugin to take effect.
+
+### Verify
+
+```bash
+openclaw plugins list
+openclaw plugins info openclaw-sage
+```
+
+### Configure
+
+Plugin settings go under `plugins.entries.openclaw-sage.config` in your OpenClaw config file. Restart the Gateway after any config change.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-sage": {
+        "enabled": true,
+        "config": {
+          "sageBinary": "/path/to/sage",
+          "sageProfile": "testnet"
+        }
+      }
+    }
+  }
+}
+```
+
+All keys are optional — `sageBinary` and `sageProfile` default to auto-detect and `default` respectively. See [Configuration](#configuration) below for the full list.
+
+### Update
+
+```bash
+openclaw plugins update openclaw-sage
+# or update all plugins at once
+openclaw plugins update --all
+```
+
+### Development Install (local linking)
+
+```bash
+openclaw plugins install -l ./path/to/openclaw-sage
+```
+
 ## Configuration
 
 The plugin auto-detects the `sage` binary from PATH. To override:
