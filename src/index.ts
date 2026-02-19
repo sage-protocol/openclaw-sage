@@ -1,5 +1,6 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
@@ -24,23 +25,23 @@ const SAGE_CONTEXT = `## Sage MCP Tools Available
 You have access to Sage MCP tools for prompts, skills, governance, and on-chain operations.
 
 ### Prompt Discovery
-- \`search_prompts\` - Hybrid keyword + semantic search for prompts
-- \`list_prompts\` - Browse prompts by source (local/onchain)
-- \`get_prompt\` - Get full prompt content by key
-- \`builder_recommend\` - AI-powered prompt suggestions based on intent
-- \`builder_synthesize\` - Create new prompts from a description
+- \`sage_search_prompts\` - Hybrid keyword + semantic search for prompts
+- \`sage_list_prompts\` - Browse prompts by source (local/onchain)
+- \`sage_get_prompt\` - Get full prompt content by key
+- \`sage_builder_recommend\` - AI-powered prompt suggestions based on intent
+- \`sage_builder_synthesize\` - Create new prompts from a description
 
 ### Skills
-- \`search_skills\` / \`list_skills\` - Find available skills
-- \`get_skill\` - Get skill details and content
-- \`use_skill\` - Activate a skill (auto-provisions required MCP servers)
-- \`sync_skills\` - Sync skills from daemon
+- \`sage_search_skills\` / \`sage_list_skills\` - Find available skills
+- \`sage_get_skill\` - Get skill details and content
+- \`sage_use_skill\` - Activate a skill (auto-provisions required MCP servers)
+- \`sage_sync_skills\` - Sync skills from daemon
 
 ### Governance & DAOs
-- \`list_subdaos\` - List available DAOs
-- \`list_proposals\` / \`sage_list_governance_proposals\` - View proposals
+- \`sage_list_subdaos\` - List available DAOs
+- \`sage_list_proposals\` / \`sage_list_governance_proposals\` - View proposals
 - \`sage_list_governance_votes\` - View vote breakdown
-- \`get_voting_power\` - Check voting power with NFT multipliers
+- \`sage_get_voting_power\` - Check voting power with NFT multipliers
 
 ### Tips, Bounties & Marketplace
 - \`sage_list_tips\` / \`sage_list_tip_stats\` - Tips activity and stats
@@ -48,31 +49,31 @@ You have access to Sage MCP tools for prompts, skills, governance, and on-chain 
 - \`sage_list_bounty_library_additions\` - Pending library merges
 
 ### Chat & Social
-- \`chat_list_rooms\` / \`chat_send\` / \`chat_history\` - Real-time messaging
+- \`sage_chat_list_rooms\` / \`sage_chat_send\` / \`sage_chat_history\` - Real-time messaging
 - Social follow/unfollow (via CLI)
 
 ### RLM (Recursive Language Model)
-- \`rlm_stats\` - RLM statistics and capture counts
-- \`rlm_analyze_captures\` - Analyze captured prompt/response pairs
-- \`rlm_list_patterns\` - Show discovered patterns
+- \`sage_rlm_stats\` - RLM statistics and capture counts
+- \`sage_rlm_analyze_captures\` - Analyze captured prompt/response pairs
+- \`sage_rlm_list_patterns\` - Show discovered patterns
 
 ### Memory & Knowledge Graph
-- \`memory_create_entities\` / \`memory_search_nodes\` / \`memory_read_graph\` - Knowledge graph ops
+- \`sage_memory_create_entities\` / \`sage_memory_search_nodes\` / \`sage_memory_read_graph\` - Knowledge graph ops
 
 ### External Tools (via Hub)
-- \`hub_list_servers\` - List available MCP servers (memory, github, brave, etc.)
-- \`hub_start_server\` - Start an MCP server to gain access to its tools
-- \`hub_status\` - Check which servers are currently running
+- \`sage_hub_list_servers\` - List available MCP servers (memory, github, brave, etc.)
+- \`sage_hub_start_server\` - Start an MCP server to gain access to its tools
+- \`sage_hub_status\` - Check which servers are currently running
 
 ### Plugin Status
 - \`sage_status\` - Check bridge health, connected network, wallet, and tool count
 
 ### Best Practices
-1. **Search before implementing** - Use \`search_prompts\` or \`builder_recommend\` to find existing solutions
+1. **Search before implementing** - Use \`sage_search_prompts\` or \`sage_builder_recommend\` to find existing solutions
 2. **Use skills for complex tasks** - Skills bundle prompts + MCP servers for specific workflows
-3. **Start additional servers as needed** - Use \`hub_start_server\` for memory, github, brave search, etc.
-4. **Check skill requirements** - Skills may require specific MCP servers; \`use_skill\` auto-provisions them
-5. **Discover before asking for DAO/CID** - Run \`list_subdaos\`, \`list_libraries\`, and \`search_skills\` first; only ask user for address/CID if unresolved
+3. **Start additional servers as needed** - Use \`sage_hub_start_server\` for memory, github, brave search, etc.
+4. **Check skill requirements** - Skills may require specific MCP servers; \`sage_use_skill\` auto-provisions them
+5. **Discover before asking for DAO/CID** - Run \`sage_list_subdaos\`, \`sage_list_libraries\`, and \`sage_search_skills\` first; only ask user for address/CID if unresolved
 6. **Privy login-code fallback** - If auth is stale, use \`sage wallet connect privy --force --device-code\`, then verify with \`sage wallet current\``;
 
 /**
@@ -210,6 +211,85 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
     lines.push(`- \`use_skill\` \`${key}\`${origin}${desc ? `: ${desc}` : ""}${servers}`);
   }
   return lines.join("\n");
+}
+
+function pickFirstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function extractEventPrompt(event: any): string {
+  return pickFirstString(
+    event?.prompt,
+    event?.input,
+    event?.message?.content,
+    event?.message?.text,
+    event?.text,
+  );
+}
+
+function extractEventResponse(event: any): string {
+  const responseObj = typeof event?.response === "object" && event?.response
+    ? event.response
+    : undefined;
+  const outputObj = typeof event?.output === "object" && event?.output
+    ? event.output
+    : undefined;
+  return pickFirstString(
+    event?.response,
+    responseObj?.text,
+    responseObj?.content,
+    event?.output,
+    outputObj?.text,
+    outputObj?.content,
+    event?.assistant?.text,
+    event?.assistant?.content,
+    event?.message?.content,
+    event?.message?.text,
+    event?.text,
+  );
+}
+
+function extractEventSessionId(event: any): string {
+  return pickFirstString(
+    event?.sessionId,
+    event?.sessionID,
+    event?.session?.id,
+    event?.conversationId,
+  );
+}
+
+function extractEventModel(event: any): string {
+  const modelObj = typeof event?.model === "object" && event?.model ? event.model : undefined;
+  return pickFirstString(
+    event?.modelId,
+    modelObj?.modelID,
+    modelObj?.modelId,
+    modelObj?.id,
+    typeof event?.model === "string" ? event.model : "",
+  );
+}
+
+function extractEventProvider(event: any): string {
+  const modelObj = typeof event?.model === "object" && event?.model ? event.model : undefined;
+  return pickFirstString(
+    event?.provider,
+    event?.providerId,
+    modelObj?.providerID,
+    modelObj?.providerId,
+  );
+}
+
+function extractEventTokenCount(event: any, phase: "input" | "output"): string {
+  const value =
+    event?.tokens?.[phase] ??
+    event?.usage?.[`${phase}_tokens`] ??
+    event?.usage?.[phase] ??
+    event?.metrics?.[`${phase}Tokens`];
+  if (value == null) return "";
+  return String(value);
 }
 
 /** Custom server configuration from mcp-servers.toml */
@@ -499,6 +579,134 @@ const plugin = {
     // Config-level profile override takes precedence
     if (sageProfile) sageEnv.SAGE_PROFILE = sageProfile;
 
+    const CAPTURE_TIMEOUT_MS = 15_000;
+    const captureState = {
+      sessionId: "",
+      model: "",
+      provider: "",
+      lastPromptHash: "",
+      lastPromptTs: 0,
+    };
+
+    const runCaptureHook = async (
+      phase: "prompt" | "response",
+      extraEnv: Record<string, string>,
+    ): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(sageBinary, ["capture", "hook", phase], {
+          env: { ...process.env, ...sageEnv, ...extraEnv },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        let stderr = "";
+        child.stderr?.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`capture hook timeout (${phase})`));
+        }, CAPTURE_TIMEOUT_MS);
+
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0 || code === null) {
+            resolve();
+            return;
+          }
+          reject(
+            new Error(`capture hook exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`),
+          );
+        });
+      });
+    };
+
+    const capturePromptFromEvent = async (hookName: string, event: any): Promise<void> => {
+      const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
+      if (!prompt) return;
+
+      const sessionId = extractEventSessionId(event);
+      const model = extractEventModel(event);
+      const provider = extractEventProvider(event);
+
+      const promptHash = sha256Hex(`${sessionId}:${prompt}`);
+      const now = Date.now();
+      if (captureState.lastPromptHash === promptHash && now - captureState.lastPromptTs < 2_000) {
+        return;
+      }
+
+      captureState.lastPromptHash = promptHash;
+      captureState.lastPromptTs = now;
+      captureState.sessionId = sessionId || captureState.sessionId;
+      captureState.model = model || captureState.model;
+      captureState.provider = provider || captureState.provider;
+
+      const attributes = {
+        openclaw: {
+          hook: hookName,
+          sessionId: sessionId || undefined,
+        },
+      };
+
+      try {
+        await runCaptureHook("prompt", {
+          SAGE_SOURCE: "openclaw",
+          OPENCLAW: "1",
+          PROMPT: prompt,
+          SAGE_SESSION_ID: sessionId || "",
+          SAGE_MODEL: model || "",
+          SAGE_PROVIDER: provider || "",
+          SAGE_CAPTURE_ATTRIBUTES_JSON: JSON.stringify(attributes),
+        });
+      } catch (err) {
+        api.logger.warn(
+          `[sage-capture] prompt capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+
+    const captureResponseFromEvent = async (hookName: string, event: any): Promise<void> => {
+      const response = normalizePrompt(extractEventResponse(event), { maxBytes: maxPromptBytes });
+      if (!response) return;
+
+      const sessionId = extractEventSessionId(event) || captureState.sessionId;
+      const model = extractEventModel(event) || captureState.model;
+      const provider = extractEventProvider(event) || captureState.provider;
+      const tokensInput = extractEventTokenCount(event, "input");
+      const tokensOutput = extractEventTokenCount(event, "output");
+
+      const attributes = {
+        openclaw: {
+          hook: hookName,
+          sessionId: sessionId || undefined,
+        },
+      };
+
+      try {
+        await runCaptureHook("response", {
+          SAGE_SOURCE: "openclaw",
+          OPENCLAW: "1",
+          SAGE_RESPONSE: response,
+          LAST_RESPONSE: response,
+          TOKENS_INPUT: tokensInput,
+          TOKENS_OUTPUT: tokensOutput,
+          SAGE_SESSION_ID: sessionId || "",
+          SAGE_MODEL: model || "",
+          SAGE_PROVIDER: provider || "",
+          SAGE_CAPTURE_ATTRIBUTES_JSON: JSON.stringify(attributes),
+        });
+      } catch (err) {
+        api.logger.warn(
+          `[sage-capture] response capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+
     // Main sage MCP bridge
     sageBridge = new McpBridge(sageBinary, ["mcp", "start"], sageEnv, {
       clientVersion: PKG_VERSION,
@@ -587,6 +795,8 @@ const plugin = {
     // Auto-inject context and suggestions at agent start.
     // This uses OpenClaw's plugin hook API (not internal hooks).
     api.on("before_agent_start", async (event: any) => {
+      await capturePromptFromEvent("before_agent_start", event);
+
       const prompt = normalizePrompt(typeof event?.prompt === "string" ? event.prompt : "", {
         maxBytes: maxPromptBytes,
       });
@@ -650,6 +860,18 @@ const plugin = {
 
       if (!parts.length) return undefined;
       return { prependContext: parts.join("\n\n") };
+    });
+
+    api.on("after_agent_response", async (event: any) => {
+      await captureResponseFromEvent("after_agent_response", event);
+    });
+
+    // Legacy OpenClaw hook names observed in older runtime builds.
+    api.on("message_received", async (event: any) => {
+      await capturePromptFromEvent("message_received", event);
+    });
+    api.on("agent_end", async (event: any) => {
+      await captureResponseFromEvent("agent_end", event);
     });
   },
 };
@@ -747,7 +969,7 @@ function registerMcpTool(
     scanText: (text: string) => Promise<SecurityScanResult | null>;
   },
 ) {
-  const name = `${prefix}_${tool.name}`;
+  const name = tool.name.startsWith(`${prefix}_`) ? tool.name : `${prefix}_${tool.name}`;
   const schema = mcpSchemaToTypebox(tool.inputSchema);
 
   // Extract category from tool annotations if available
