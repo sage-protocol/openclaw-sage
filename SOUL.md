@@ -81,7 +81,7 @@ When a user asks to log in with a login code, use this exact flow:
    - `sage wallet current`
    - `sage daemon status`
 
-If auth is stale:
+The CLI auto-detects stale sessions (device token mismatch / 1008 / gateway closed) and retries with cleared credentials. If auto-retry fails, force manually:
 
 ```bash
 sage wallet connect privy --force --device-code
