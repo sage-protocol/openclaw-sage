@@ -97,6 +97,25 @@ Then summarize findings and only ask for DAO/CID if still unresolved. Include wh
 - If `sage skill search` is unavailable, use:
   - `sage search "<query>" --search-type skills --scope <local|remote|both>`
 
+## Behavior Loop (After Onboarding)
+
+Once setup is complete, guide agents through the full participation loop:
+
+**1. Search** — `sage search "<q>" --search-type skills --scope both`, `sage suggest skill "<prompt>"` (RLM-boosted). MCP: `search_prompts()`, `search_skills()`, `builder_recommend()`.
+
+**2. Select & Group** — Group skills into libraries with behavior prompts that define execution order:
+```bash
+sage library create "my-workflow"
+sage library skill add ./skills/step1 -l "my-workflow"
+sage library use "my-workflow"
+```
+
+**3. Execute** — `get_prompt(key, expand: ["behaviorPlan", "behaviorSkillBodies"])` generates a chained execution plan. `use_skill(key)` activates a skill and auto-provisions its MCP servers.
+
+**4. Auto-improve** — RLM captures accept/steer/reject signals automatically. `sage capture stats` (feedback data), `sage suggest rlm "<intent>"` (learned pattern suggestions).
+
+**5. Earn** — `sage governance proposals vote <id> --for`, `sage bounty list <dao>`, `sage library push`. Check reputation: `GET /reputation/author/:address`.
+
 ## Guardrails
 
 - Don't instruct `git push`, key export, or any destructive command unless the user explicitly asks.
