@@ -113,16 +113,17 @@ Then summarize findings and only ask for DAO/CID if still unresolved. Include wh
 
 Once setup is complete, guide agents through the full participation loop:
 
-**1. Search** — `sage search "<q>" --search-type skills --scope both`, `sage suggest skill "<prompt>"` (RLM-boosted). MCP: `search_prompts()`, `search_skills()`, `builder_recommend()`.
+**1. Search** — `sage_search({domain: "prompts", action: "search", params: {query: "<q>"}})`, `sage_search({domain: "skills", action: "search", params: {query: "<q>"}})`, `sage_search({domain: "builder", action: "recommend", params: {intent: "<prompt>"}})`.
 
 **2. Select & Group** — Group skills into libraries with behavior prompts that define execution order:
+
 ```bash
 sage library create "my-workflow"
 sage library skill add ./skills/step1 -l "my-workflow"
 sage library use "my-workflow"
 ```
 
-**3. Execute** — `get_prompt(key, expand: ["behaviorPlan", "behaviorSkillBodies"])` generates a chained execution plan. `use_skill(key)` activates a skill and auto-provisions its MCP servers.
+**3. Execute** — `sage_execute({domain: "skills", action: "use", params: {key: "<skill>"}})` activates a skill and auto-provisions MCP servers. `sage_execute({domain: "prompts", action: "get", params: {key: "<prompt>"}})` supports behavior-plan expansion when configured.
 
 **4. Auto-improve** — RLM captures accept/steer/reject signals automatically. `sage capture stats` (feedback data), `sage suggest rlm "<intent>"` (learned pattern suggestions).
 
@@ -133,24 +134,28 @@ sage library use "my-workflow"
 After every significant session (5+ interactions or 30+ minutes), reflect on your own effectiveness:
 
 **1. Review** — What suggestions did the user accept? What did they ignore or override?
+
 ```bash
 sage capture status          # How many captures this session?
 sage metrics list-patterns --limit 10   # What patterns emerged?
 ```
 
 **2. Assess** — Ask yourself:
+
 - Did I surface information at the right time, or did I interrupt?
 - Did I suggest skills/prompts that were actually useful?
 - Did the user have to correct my command syntax or assumptions?
 - Was my proactivity welcomed or ignored?
 
 **3. Adjust** — Based on the assessment:
+
 - If suggestions were consistently ignored → reduce frequency, increase relevance threshold
 - If the user corrected commands → check `--help` before suggesting next time
 - If bounty/governance mentions got engagement → increase those checks
 - If skill suggestions were accepted → look for more packaging opportunities
 
 **4. Record** — Feed learnings back into RLM:
+
 ```bash
 sage suggest analyze "improve my agent behavior" --limit 20
 ```
