@@ -287,74 +287,6 @@ const SageDomain = Type.Union(
   { description: "Sage domain namespace" },
 );
 
-function jsonSchemaToTypebox(prop: Record<string, unknown>): TSchema {
-  const desc = typeof prop.description === "string" ? prop.description : undefined;
-  const opts: Record<string, unknown> = {};
-  if (desc) opts.description = desc;
-
-  if (Array.isArray(prop.enum) && prop.enum.length > 0) {
-    const literals = prop.enum
-      .filter((v): v is string | number | boolean =>
-        ["string", "number", "boolean"].includes(typeof v),
-      )
-      .map((v) => Type.Literal(v));
-    if (literals.length > 0) {
-      return literals.length === 1 ? literals[0] : Type.Union(literals, opts);
-    }
-  }
-
-  switch (prop.type) {
-    case "number":
-    case "integer":
-      return Type.Number(opts);
-    case "boolean":
-      return Type.Boolean(opts);
-    case "array": {
-      const items = prop.items as Record<string, unknown> | undefined;
-      const itemType =
-        items && typeof items === "object" ? jsonSchemaToTypebox(items) : Type.Unknown();
-      return Type.Array(itemType, opts);
-    }
-    case "object": {
-      const nested = prop.properties as Record<string, Record<string, unknown>> | undefined;
-      if (nested && typeof nested === "object" && Object.keys(nested).length > 0) {
-        const nestedRequired = new Set(
-          Array.isArray(prop.required) ? (prop.required as string[]) : [],
-        );
-        const nestedFields: Record<string, TSchema> = {};
-        for (const [k, v] of Object.entries(nested)) {
-          const field = jsonSchemaToTypebox(v);
-          nestedFields[k] = nestedRequired.has(k) ? field : Type.Optional(field);
-        }
-        return Type.Object(nestedFields, { ...opts, additionalProperties: true });
-      }
-      return Type.Record(Type.String(), Type.Unknown(), opts);
-    }
-    default:
-      return Type.String(opts);
-  }
-}
-
-function mcpSchemaToTypebox(inputSchema?: Record<string, unknown>) {
-  if (!inputSchema || typeof inputSchema !== "object") {
-    return Type.Object({});
-  }
-
-  const properties = (inputSchema.properties ?? {}) as Record<string, Record<string, unknown>>;
-  const required = new Set(
-    Array.isArray(inputSchema.required) ? (inputSchema.required as string[]) : [],
-  );
-
-  const fields: Record<string, TSchema> = {};
-
-  for (const [key, prop] of Object.entries(properties)) {
-    const field = jsonSchemaToTypebox(prop);
-    fields[key] = required.has(key) ? field : Type.Optional(field);
-  }
-
-  return Type.Object(fields, { additionalProperties: true });
-}
-
 function toToolResult(mcpResult: unknown) {
   const result = mcpResult as {
     content?: Array<{ type: string; text?: string }>;
@@ -943,7 +875,5 @@ export const __test = {
   normalizePrompt,
   extractJsonFromMcpResult,
   formatSkillSuggestions,
-  mcpSchemaToTypebox,
-  jsonSchemaToTypebox,
   enrichErrorMessage,
 };

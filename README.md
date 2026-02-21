@@ -1,14 +1,14 @@
 # Sage Plugin (OpenClaw)
 
-MCP bridge plugin that exposes all Sage Protocol tools inside OpenClaw. Spawns the sage MCP server as a child process and translates JSON-RPC calls into registered OpenClaw tools.
+MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode. Spawns the sage MCP server as a child process and routes all tool calls through 3 fixed Code Mode tools.
 
 ## What It Does
 
-- **MCP Tool Bridge** - Spawns `sage mcp start` and translates JSON-RPC tool calls into native OpenClaw tools
+- **Code Mode Gateway** - Spawns `sage mcp start` and routes all calls through `sage_search`/`sage_execute`/`sage_status`
 - **Auto-Context Injection** - Injects Sage tool context and skill suggestions at agent start
-- **Injection Guard** - Optional prompt-injection scanning for fetched prompt content
+- **Injection Guard** - Optional prompt-injection scanning on outgoing `sage_execute` mutations
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
-- **External Servers** - Loads additional MCP servers from `~/.config/sage/mcp-servers.toml`
+- **External Servers** - Access hub-managed external MCP servers via `domain: "external"`
 
 ## Install
 ```bash
@@ -98,7 +98,7 @@ This reads `~/.local/share/sage/souls/<subdao>-<libraryId>.md` when present.
 
 ### Injection Guard (Opt-In)
 
-This plugin can optionally scan the agent prompt and fetched prompt content (e.g. from `sage_get_prompt`) for common prompt-injection / jailbreak patterns using Sage's built-in deterministic scanner.
+This plugin can optionally scan outgoing `sage_execute` mutation params for common prompt-injection / jailbreak patterns using Sage's built-in deterministic scanner. The Rust layer handles incoming content scanning server-side.
 
 By default this is **off**.
 
@@ -107,7 +107,6 @@ By default this is **off**.
   "injectionGuardEnabled": true,
   "injectionGuardMode": "warn",
   "injectionGuardScanAgentPrompt": true,
-  "injectionGuardScanGetPrompt": true,
   "injectionGuardUsePromptGuard": false,
   "injectionGuardMaxChars": 32768,
   "injectionGuardIncludeEvidence": false
@@ -115,7 +114,8 @@ By default this is **off**.
 ```
 
 Notes:
-- `injectionGuardMode=block` blocks `sage_get_prompt` results that are flagged, but cannot reliably abort the overall agent run (it injects a warning at start instead).
+- `injectionGuardMode=block` blocks `sage_execute` calls whose params are flagged.
+- `injectionGuardScanAgentPrompt` scans the agent's initial prompt at start.
 - `injectionGuardUsePromptGuard` sends text to HuggingFace Prompt Guard if `SAGE_PROMPT_GUARD_API_KEY` is set; keep this off unless you explicitly want third-party scanning.
 
 ### Avoiding Double Injection
@@ -128,56 +128,29 @@ The internal hook exists mainly for bootstrap-file injection; the plugin is the 
 
 ## What It Provides
 
-Once loaded, all Sage MCP tools are available in OpenClaw with a `sage_` prefix:
+The plugin registers 3 fixed tools via Code Mode, replacing 60+ dynamic tool registrations:
 
-### Prompts & Libraries
-- `sage_search_prompts` - Hybrid keyword + semantic search
-- `sage_list_prompts` - Browse prompts by source
-- `sage_get_prompt` - Full prompt content
-- `sage_quick_create_prompt` - Create new prompts
-- `sage_list_libraries` - Local/on-chain libraries
+### `sage_search` — Read-only search across all domains
 
-### Skills
-- `sage_search_skills` / `sage_list_skills` - Find skills
-- `sage_get_skill` - Skill details and content
-- `sage_use_skill` - Activate a skill (auto-provisions MCP servers)
-- `sage_sync_skills` - Sync from daemon
+```
+sage_search({domain: "prompts", action: "search", params: {query: "rust MCP"}})
+sage_search({domain: "skills", action: "list"})
+sage_search({domain: "governance", action: "list_subdaos"})
+sage_search({domain: "help", action: "list"})  // discover all actions
+sage_search({domain: "external", action: "list_servers"})
+```
 
-### Builder
-- `sage_builder_recommend` - AI-powered prompt suggestions
-- `sage_builder_synthesize` - Synthesize from intent
-- `sage_builder_vote` - Feedback on recommendations
+Domains: `prompts`, `skills`, `builder`, `governance`, `chat`, `social`, `rlm`, `library_sync`, `security`, `help`, `external`
 
-### Governance & DAOs
-- `sage_list_subdaos` - List available DAOs
-- `sage_list_proposals` / `sage_list_governance_proposals` - View proposals
-- `sage_list_governance_votes` - Vote breakdown
-- `sage_get_voting_power` - Voting power with NFT multipliers
+### `sage_execute` — Mutations across any domain or external server
 
-### Tips, Bounties & Marketplace
-- `sage_list_tips` / `sage_list_tip_stats` - Tips activity and stats
-- `sage_list_bounties` - Open/completed bounties
-- `sage_list_bounty_library_additions` - Pending library merges
+```
+sage_execute({domain: "skills", action: "use", params: {key: "mcp-builder"}})
+sage_execute({domain: "external", action: "execute", params: {server_id: "github", tool_name: "list_repos"}})
+sage_execute({domain: "external", action: "call", params: {tool_name: "search", tool_params: {q: "..."}}})
+```
 
-### Chat & Social
-- `sage_chat_list_rooms` / `sage_chat_send` / `sage_chat_history` - Real-time messaging
-
-### RLM (Recursive Language Model)
-- `sage_rlm_stats` - Statistics and capture counts
-- `sage_rlm_analyze_captures` - Analyze captured data
-- `sage_rlm_list_patterns` - Discovered patterns
-
-### Memory & Knowledge Graph
-- `sage_memory_create_entities` / `sage_memory_search_nodes` / `sage_memory_read_graph`
-
-### Hub (External MCP Servers)
-- `sage_hub_list_servers` - List available MCP servers
-- `sage_hub_start_server` - Start a server
-- `sage_hub_stop_server` - Stop a server
-- `sage_hub_status` - Check running servers
-
-### Plugin Meta
-- `sage_status` - Bridge health, wallet, network, tool count
+### `sage_status` — Bridge health, wallet, network status
 
 ## Requirements
 
