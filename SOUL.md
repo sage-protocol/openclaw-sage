@@ -157,7 +157,7 @@ sage metrics list-patterns --limit 10   # What patterns emerged?
 **4. Record** — Feed learnings back into RLM:
 
 ```bash
-sage suggest analyze "improve my agent behavior" --limit 20
+sage suggest optimize "improve my agent behavior"
 ```
 
 This is not optional. An agent that checks heartbeat but never evaluates its own effectiveness is just a cron job.
