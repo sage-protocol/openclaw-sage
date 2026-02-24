@@ -1,5 +1,6 @@
 import { Type, type TSchema } from "@sinclair/typebox";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
@@ -20,23 +21,22 @@ const PKG_VERSION: string = (() => {
 
 const SAGE_CONTEXT = `## Sage (Code Mode)
 
-Sage exposes exactly two MCP tools:
-- \`sage_search\` - read/discovery (search, list, stats, help)
-- \`sage_execute\` - actions/mutations (get prompt, use skill, hub start/stop)
+You have access to Sage through a consolidated Code Mode interface.
 
-Both take an object: { domain, action, params }
+### Core Tools
+- \`sage_search\` — Read-only search across Sage domains. Params: \`{domain, action, params}\`
+- \`sage_execute\` — Mutations across Sage domains. Same params.
+
+Domains: prompts, skills, builder, governance, chat, social, rlm, library_sync, security, meta, hub, help, external
 
 Examples:
-- Find prompts: sage_search { domain: "prompts", action: "search", params: { query: "..." } }
-- Get a prompt: sage_execute { domain: "prompts", action: "get", params: { key: "..." } }
-- Find skills: sage_search { domain: "skills", action: "search", params: { query: "..." } }
-- Activate a skill: sage_execute { domain: "skills", action: "use", params: { key: "..." } }
-- List domains/actions: sage_search { domain: "help", action: "list", params: {} }
-
-Hub + meta:
+- Discover actions: sage_search { domain: "help", action: "list", params: {} }
+- Search prompts: sage_search { domain: "prompts", action: "search", params: { query: "..." } }
+- Use a skill: sage_execute { domain: "skills", action: "use", params: { key: "..." } }
 - Project context: sage_search { domain: "meta", action: "get_project_context", params: {} }
-- Hub list servers: sage_search { domain: "hub", action: "list_servers", params: {} }
-- Hub start server: sage_execute { domain: "hub", action: "start", params: { server_id: "memory" } }`;
+- List external servers: sage_search { domain: "external", action: "list_servers" }
+- Call an external tool (auto-route): sage_execute { domain: "external", action: "call", params: { tool_name: "<tool>", tool_params: {...} } }
+- Execute an external tool (explicit): sage_execute { domain: "external", action: "execute", params: { server_id: "<id>", tool_name: "<tool>", tool_params: {...} } }`;
 
 const SAGE_STATUS_CONTEXT = `\n\nPlugin meta-tool:\n- \`sage_status\` - show bridge health + wallet/network context`;
 
@@ -188,6 +188,206 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
   }
   return lines.join("\n");
 }
+
+function isHeartbeatPrompt(prompt: string): boolean {
+  return (
+    prompt.includes("Sage Protocol Heartbeat") ||
+    prompt.includes("HEARTBEAT_OK") ||
+    prompt.includes("Heartbeat Checklist")
+  );
+}
+
+const heartbeatSuggestState = {
+  lastFullAnalysisTs: 0,
+  lastSuggestions: "",
+};
+
+async function gatherHeartbeatContext(
+  bridge: McpBridge,
+  logger: PluginLogger,
+  maxChars: number,
+): Promise<string> {
+  const parts: string[] = [];
+
+  // 1) Query RLM patterns
+  try {
+    const raw = await bridge.callTool("sage_search", {
+      domain: "rlm",
+      action: "list_patterns",
+      params: {},
+    });
+    const json = extractJsonFromMcpResult(raw);
+    if (json) parts.push(`RLM patterns: ${JSON.stringify(json)}`);
+  } catch (err) {
+    logger.warn(
+      `[heartbeat-context] RLM query failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 2) Read recent daily notes (last 2 days)
+  try {
+    const memoryDir = join(homedir(), ".openclaw", "memory");
+    if (existsSync(memoryDir)) {
+      const now = new Date();
+      const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60_000);
+      const files = readdirSync(memoryDir)
+        .filter((f) => /^\d{4}-.*\.md$/.test(f))
+        .sort()
+        .reverse();
+
+      for (const file of files.slice(0, 4)) {
+        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (dateMatch) {
+          const fileDate = new Date(dateMatch[1]);
+          if (fileDate < twoDaysAgo) continue;
+        }
+        const content = readFileSync(join(memoryDir, file), "utf8").trim();
+        if (content) parts.push(`--- ${file} ---\n${content}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      `[heartbeat-context] memory read failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const combined = parts.join("\n\n");
+  return combined.length > maxChars ? combined.slice(0, maxChars) : combined;
+}
+
+async function searchSkillsForContext(
+  bridge: McpBridge,
+  context: string,
+  suggestLimit: number,
+  logger: PluginLogger,
+): Promise<string> {
+  const results: SkillSearchResult[] = [];
+
+  // Search skills against the context
+  try {
+    const raw = await bridge.callTool("sage_search", {
+      domain: "skills",
+      action: "search",
+      params: {
+        query: context,
+        source: "all",
+        limit: Math.max(20, suggestLimit),
+      },
+    });
+    const json = extractJsonFromMcpResult(raw) as any;
+    if (Array.isArray(json?.results)) results.push(...json.results);
+  } catch (err) {
+    logger.warn(
+      `[heartbeat-context] skill search failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Also try builder recommendations
+  try {
+    const raw = await bridge.callTool("sage_search", {
+      domain: "builder",
+      action: "recommend",
+      params: { query: context },
+    });
+    const json = extractJsonFromMcpResult(raw) as any;
+    if (Array.isArray(json?.results)) {
+      for (const r of json.results) {
+        if (r?.key && !results.some((e) => e.key === r.key)) results.push(r);
+      }
+    }
+  } catch {
+    // Builder recommend is optional.
+  }
+
+  const formatted = formatSkillSuggestions(results, suggestLimit);
+  return formatted ? `## Context-Aware Skill Suggestions\n\n${formatted}` : "";
+}
+
+function pickFirstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function extractEventPrompt(event: any): string {
+  return pickFirstString(
+    event?.prompt,
+    event?.input,
+    event?.message?.content,
+    event?.message?.text,
+    event?.text,
+  );
+}
+
+function extractEventResponse(event: any): string {
+  const responseObj =
+    typeof event?.response === "object" && event?.response ? event.response : undefined;
+  const outputObj = typeof event?.output === "object" && event?.output ? event.output : undefined;
+  return pickFirstString(
+    event?.response,
+    responseObj?.content,
+    responseObj?.text,
+    responseObj?.message,
+    event?.output,
+    outputObj?.content,
+    outputObj?.text,
+  );
+}
+
+function extractEventSessionId(event: any): string {
+  return pickFirstString(event?.sessionId, event?.sessionID, event?.conversationId);
+}
+
+function extractEventModel(event: any): string {
+  const modelObj = typeof event?.model === "object" && event?.model ? event.model : undefined;
+  return pickFirstString(
+    event?.modelId,
+    modelObj?.modelID,
+    modelObj?.modelId,
+    modelObj?.id,
+    typeof event?.model === "string" ? event.model : "",
+  );
+}
+
+function extractEventProvider(event: any): string {
+  const modelObj = typeof event?.model === "object" && event?.model ? event.model : undefined;
+  return pickFirstString(
+    event?.provider,
+    event?.providerId,
+    modelObj?.providerID,
+    modelObj?.providerId,
+  );
+}
+
+function extractEventTokenCount(event: any, phase: "input" | "output"): string {
+  const value =
+    event?.tokens?.[phase] ??
+    event?.usage?.[`${phase}_tokens`] ??
+    event?.usage?.[phase] ??
+    event?.metrics?.[`${phase}Tokens`];
+  if (value == null) return "";
+  return String(value);
+}
+
+const SageDomain = Type.Union(
+  [
+    Type.Literal("prompts"),
+    Type.Literal("skills"),
+    Type.Literal("builder"),
+    Type.Literal("governance"),
+    Type.Literal("chat"),
+    Type.Literal("social"),
+    Type.Literal("rlm"),
+    Type.Literal("library_sync"),
+    Type.Literal("security"),
+    Type.Literal("meta"),
+    Type.Literal("hub"),
+    Type.Literal("help"),
+    Type.Literal("external"),
+  ],
+  { description: "Sage domain namespace" },
+);
 
 type SageCodeModeRequest = {
   domain: string;
@@ -348,6 +548,17 @@ const plugin = {
     const minPromptLen = clampInt(pluginCfg.minPromptLen, 12, 0, 500);
     const maxPromptBytes = clampInt(pluginCfg.maxPromptBytes, 16_384, 512, 65_536);
 
+    // Heartbeat context-aware suggestions
+    const heartbeatContextSuggest = pluginCfg.heartbeatContextSuggest !== false;
+    const heartbeatSuggestCooldownMs =
+      clampInt(pluginCfg.heartbeatSuggestCooldownMinutes, 90, 10, 1440) * 60_000;
+    const heartbeatContextMaxChars = clampInt(
+      pluginCfg.heartbeatContextMaxChars,
+      4000,
+      500,
+      16_000,
+    );
+
     // Injection guard (opt-in)
     const injectionGuardEnabled = pluginCfg.injectionGuardEnabled === true;
     const injectionGuardMode = pluginCfg.injectionGuardMode === "block" ? "block" : "warn";
@@ -439,6 +650,137 @@ const plugin = {
     // Config-level profile override takes precedence
     if (sageProfile) sageEnv.SAGE_PROFILE = sageProfile;
 
+    // ── Capture hooks (best-effort) ───────────────────────────────────
+    // These run the CLI capture hook in a child process. They are intentionally
+    // non-blocking for agent UX; failures are logged and ignored.
+    const captureHooksEnabled = process.env.SAGE_CAPTURE_HOOKS !== "0";
+    const CAPTURE_TIMEOUT_MS = 8_000;
+    const captureState = {
+      sessionId: "",
+      model: "",
+      provider: "",
+      lastPromptHash: "",
+      lastPromptTs: 0,
+    };
+
+    const runCaptureHook = async (
+      phase: "prompt" | "response",
+      extraEnv: Record<string, string>,
+    ): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(sageBinary, ["capture", "hook", phase], {
+          env: { ...process.env, ...sageEnv, ...extraEnv },
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+
+        let stderr = "";
+        child.stderr?.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`capture hook timeout (${phase})`));
+        }, CAPTURE_TIMEOUT_MS);
+
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0 || code === null) {
+            resolve();
+            return;
+          }
+          reject(
+            new Error(`capture hook exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`),
+          );
+        });
+      });
+    };
+
+    const capturePromptFromEvent = (hookName: string, event: any): void => {
+      if (!captureHooksEnabled) return;
+
+      const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
+      if (!prompt) return;
+
+      const sessionId = extractEventSessionId(event);
+      const model = extractEventModel(event);
+      const provider = extractEventProvider(event);
+
+      const promptHash = sha256Hex(`${sessionId}:${prompt}`);
+      const now = Date.now();
+      if (captureState.lastPromptHash === promptHash && now - captureState.lastPromptTs < 2_000) {
+        return;
+      }
+      captureState.lastPromptHash = promptHash;
+      captureState.lastPromptTs = now;
+      captureState.sessionId = sessionId || captureState.sessionId;
+      captureState.model = model || captureState.model;
+      captureState.provider = provider || captureState.provider;
+
+      const attributes = {
+        openclaw: {
+          hook: hookName,
+          sessionId: sessionId || undefined,
+        },
+      };
+
+      void runCaptureHook("prompt", {
+        SAGE_SOURCE: "openclaw",
+        OPENCLAW: "1",
+        PROMPT: prompt,
+        SAGE_SESSION_ID: sessionId || "",
+        SAGE_MODEL: model || "",
+        SAGE_PROVIDER: provider || "",
+        SAGE_CAPTURE_ATTRIBUTES_JSON: JSON.stringify(attributes),
+      }).catch((err) => {
+        api.logger.warn(
+          `[sage-capture] prompt capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    };
+
+    const captureResponseFromEvent = (hookName: string, event: any): void => {
+      if (!captureHooksEnabled) return;
+
+      const response = normalizePrompt(extractEventResponse(event), { maxBytes: maxPromptBytes });
+      if (!response) return;
+
+      const sessionId = extractEventSessionId(event) || captureState.sessionId;
+      const model = extractEventModel(event) || captureState.model;
+      const provider = extractEventProvider(event) || captureState.provider;
+      const tokensInput = extractEventTokenCount(event, "input");
+      const tokensOutput = extractEventTokenCount(event, "output");
+
+      const attributes = {
+        openclaw: {
+          hook: hookName,
+          sessionId: sessionId || undefined,
+        },
+      };
+
+      void runCaptureHook("response", {
+        SAGE_SOURCE: "openclaw",
+        OPENCLAW: "1",
+        SAGE_RESPONSE: response,
+        LAST_RESPONSE: response,
+        TOKENS_INPUT: tokensInput,
+        TOKENS_OUTPUT: tokensOutput,
+        SAGE_SESSION_ID: sessionId || "",
+        SAGE_MODEL: model || "",
+        SAGE_PROVIDER: provider || "",
+        SAGE_CAPTURE_ATTRIBUTES_JSON: JSON.stringify(attributes),
+      }).catch((err) => {
+        api.logger.warn(
+          `[sage-capture] response capture failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    };
+
     // Main sage MCP bridge
     sageBridge = new McpBridge(sageBinary, ["mcp", "start"], sageEnv, {
       clientVersion: PKG_VERSION,
@@ -460,6 +802,7 @@ const plugin = {
           ctx.logger.info(`Discovered ${tools.length} Sage MCP tools`);
 
           registerCodeModeTools(api, {
+            injectionGuardEnabled,
             injectionGuardScanGetPrompt,
             injectionGuardMode,
             scanText,
@@ -484,9 +827,9 @@ const plugin = {
     // Auto-inject context and suggestions at agent start.
     // This uses OpenClaw's plugin hook API (not internal hooks).
     api.on("before_agent_start", async (event: any) => {
-      const prompt = normalizePrompt(typeof event?.prompt === "string" ? event.prompt : "", {
-        maxBytes: maxPromptBytes,
-      });
+      capturePromptFromEvent("before_agent_start", event);
+
+      const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
       let guardNotice = "";
       if (injectionGuardScanAgentPrompt && prompt) {
         const scan = await scanText(prompt);
@@ -529,7 +872,42 @@ const plugin = {
       }
 
       let suggestBlock = "";
-      if (autoSuggest && sageBridge) {
+      const isHeartbeat = isHeartbeatPrompt(prompt);
+
+      if (isHeartbeat && heartbeatContextSuggest && sageBridge?.isReady()) {
+        const now = Date.now();
+        const cooldownElapsed =
+          now - heartbeatSuggestState.lastFullAnalysisTs >= heartbeatSuggestCooldownMs;
+
+        if (cooldownElapsed) {
+          api.logger.info("[heartbeat-context] Running full context-aware skill analysis");
+          try {
+            const context = await gatherHeartbeatContext(
+              sageBridge,
+              api.logger,
+              heartbeatContextMaxChars,
+            );
+            if (context) {
+              suggestBlock = await searchSkillsForContext(
+                sageBridge,
+                context,
+                suggestLimit,
+                api.logger,
+              );
+              heartbeatSuggestState.lastFullAnalysisTs = now;
+              heartbeatSuggestState.lastSuggestions = suggestBlock;
+            }
+          } catch (err) {
+            api.logger.warn(
+              `[heartbeat-context] Full analysis failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } else {
+          suggestBlock = heartbeatSuggestState.lastSuggestions;
+        }
+      }
+
+      if (!suggestBlock && autoSuggest && sageBridge?.isReady()) {
         try {
           const raw = await sageSearch({
             domain: "skills",
@@ -556,6 +934,18 @@ const plugin = {
 
       if (!parts.length) return undefined;
       return { prependContext: parts.join("\n\n") };
+    });
+
+    api.on("after_agent_response", async (event: any) => {
+      captureResponseFromEvent("after_agent_response", event);
+    });
+
+    // Legacy OpenClaw hook names observed in older runtime builds.
+    api.on("message_received", async (event: any) => {
+      capturePromptFromEvent("message_received", event);
+    });
+    api.on("agent_end", async (event: any) => {
+      captureResponseFromEvent("agent_end", event);
     });
   },
 };
@@ -646,6 +1036,7 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
 function registerCodeModeTools(
   api: PluginApi,
   opts: {
+    injectionGuardEnabled: boolean;
     injectionGuardScanGetPrompt: boolean;
     injectionGuardMode: "warn" | "block";
     scanText: (text: string) => Promise<SecurityScanResult | null>;
@@ -657,7 +1048,7 @@ function registerCodeModeTools(
       label: "Sage: search",
       description: "Sage code-mode search/discovery (domain/action routing)",
       parameters: Type.Object({
-        domain: Type.String(),
+        domain: SageDomain,
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
@@ -669,6 +1060,13 @@ function registerCodeModeTools(
             params.params && typeof params.params === "object"
               ? (params.params as Record<string, unknown>)
               : {};
+
+          if (domain === "external" && !["list_servers", "search"].includes(action)) {
+            return toToolResult({
+              error: "For external domain, sage_search only supports actions: list_servers, search",
+            });
+          }
+
           const result = await sageSearch({ domain, action, params: p });
           return toToolResult(result);
         } catch (err) {
@@ -689,7 +1087,7 @@ function registerCodeModeTools(
       label: "Sage: execute",
       description: "Sage code-mode execute/mutations (domain/action routing)",
       parameters: Type.Object({
-        domain: Type.String(),
+        domain: SageDomain,
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
@@ -701,6 +1099,24 @@ function registerCodeModeTools(
             params.params && typeof params.params === "object"
               ? (params.params as Record<string, unknown>)
               : {};
+
+          if (opts.injectionGuardEnabled) {
+            const scan = await opts.scanText(JSON.stringify({ domain, action, params: p }));
+            if (scan?.shouldBlock) {
+              const summary = formatSecuritySummary(scan);
+              if (opts.injectionGuardMode === "block") {
+                return toToolResult({ error: `Blocked by injection guard: ${summary}` });
+              }
+              api.logger.warn(`[injection-guard] warn: ${summary}`);
+            }
+          }
+
+          if (domain === "external" && !["execute", "call"].includes(action)) {
+            return toToolResult({
+              error: "For external domain, sage_execute only supports actions: execute, call",
+            });
+          }
+
           const result = await sageExecute({ domain, action, params: p });
 
           if (opts.injectionGuardScanGetPrompt && domain === "prompts" && action === "get") {

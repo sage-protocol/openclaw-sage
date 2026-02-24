@@ -308,6 +308,10 @@ test("OpenClaw plugin registers before_agent_start hook and returns prependConte
 
   plugin.register(api as any);
   assert.ok(typeof hooks.before_agent_start === "function", "expected before_agent_start hook");
+  assert.ok(
+    typeof hooks.after_agent_response === "function" || typeof hooks.agent_end === "function",
+    "expected a response capture hook (after_agent_response or agent_end)",
+  );
 
   const result = await hooks.before_agent_start({ prompt: "build an mcp server" });
   assert.ok(result && typeof result === "object");
