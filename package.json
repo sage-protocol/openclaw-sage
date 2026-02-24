@@ -14,7 +14,6 @@
     "test": "node --import tsx src/mcp-bridge.test.ts"
   },
   "dependencies": {
-    "@iarna/toml": "^2.2.5",
     "@sinclair/typebox": "^0.34.0"
   },
   "devDependencies": {

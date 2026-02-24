@@ -5,8 +5,8 @@
  *   1. Spawn sage MCP server with isolated HOME
  *   2. Simulate message_received hook (sage capture hook prompt)
  *   3. Simulate agent_end hook (sage capture hook response)
- *   4. Verify captures landed via rlm_stats MCP tool
- *   5. Run rlm_analyze_captures and verify stats update
+ *   4. Verify captures landed via sage_search { domain: "rlm", action: "stats" }
+ *   5. Run sage_search { domain: "rlm", action: "analyze_captures" } and verify stats update
  */
 
 import test from "node:test";
@@ -20,7 +20,17 @@ import { randomUUID } from "node:crypto";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const sageBin = resolve(new URL("..", import.meta.url).pathname, "..", "target", "debug", "sage");
+function resolveSageBinaryForE2e(): string {
+  const override = process.env.SAGE_BIN_TEST || process.env.SAGE_BIN;
+  if (override && override.trim()) return override.trim();
+
+  // Monorepo layout: packages/openclaw-sage and packages/sage
+  const here = resolve(new URL("..", import.meta.url).pathname);
+  const exe = process.platform === "win32" ? "sage.exe" : "sage";
+  return resolve(here, "..", "sage", "target", "debug", exe);
+}
+
+const sageBin = resolveSageBinaryForE2e();
 
 function createIsolatedHome(): string {
   return mkdtempSync(resolve(tmpdir(), "sage-openclaw-e2e-"));
@@ -122,7 +132,7 @@ function runCaptureCli(
 
 const TIMEOUT = 60_000;
 
-test("OpenClaw capture flow: prompt + response -> rlm_stats", { timeout: TIMEOUT }, async () => {
+test("OpenClaw capture flow: prompt + response -> rlm stats", { timeout: TIMEOUT }, async () => {
   const tmpHome = createIsolatedHome();
   const env = isolatedEnv(tmpHome);
 
@@ -145,7 +155,11 @@ test("OpenClaw capture flow: prompt + response -> rlm_stats", { timeout: TIMEOUT
     client.notify("notifications/initialized", {});
 
     // Baseline stats
-    const baselineStats = await callTool(client, "rlm_stats");
+    const baselineStats = await callTool(client, "sage_search", {
+      domain: "rlm",
+      action: "stats",
+      params: {},
+    });
     assert.ok(baselineStats, "rlm_stats should return a result");
 
     // Inject captures mimicking OpenClaw's message_received + agent_end hooks
@@ -202,17 +216,27 @@ test("OpenClaw capture flow: prompt + response -> rlm_stats", { timeout: TIMEOUT
     }
 
     // Run analysis via MCP
-    const analysisResult = await callTool(client, "rlm_analyze_captures", {
-      goal: "improve developer productivity",
+    const analysisResult = await callTool(client, "sage_search", {
+      domain: "rlm",
+      action: "analyze_captures",
+      params: { goal: "improve developer productivity" },
     });
     assert.ok(analysisResult, "rlm_analyze_captures should return a result");
 
     // Check patterns
-    const patterns = await callTool(client, "rlm_list_patterns", {});
+    const patterns = await callTool(client, "sage_search", {
+      domain: "rlm",
+      action: "list_patterns",
+      params: {},
+    });
     assert.ok(patterns, "rlm_list_patterns should return a result");
 
     // Final stats should reflect some activity
-    const finalStats = await callTool(client, "rlm_stats");
+    const finalStats = await callTool(client, "sage_search", {
+      domain: "rlm",
+      action: "stats",
+      params: {},
+    });
     assert.ok(finalStats, "final rlm_stats should return a result");
   } finally {
     proc.kill("SIGTERM");

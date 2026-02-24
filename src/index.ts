@@ -4,9 +4,8 @@ import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import TOML from "@iarna/toml";
 
-import { McpBridge, type McpToolDef } from "./mcp-bridge.js";
+import { McpBridge } from "./mcp-bridge.js";
 
 // Read version from package.json at module load time
 const __dirname_compat = dirname(fileURLToPath(import.meta.url));
@@ -19,61 +18,29 @@ const PKG_VERSION: string = (() => {
   }
 })();
 
-const SAGE_CONTEXT = `## Sage MCP Tools Available
+const SAGE_CONTEXT = `## Sage (Code Mode)
 
-You have access to Sage MCP tools for prompts, skills, governance, and on-chain operations.
+Sage exposes exactly two MCP tools:
+- \`sage_search\` - read/discovery (search, list, stats, help)
+- \`sage_execute\` - actions/mutations (get prompt, use skill, hub start/stop)
 
-### Prompt Discovery
-- \`search_prompts\` - Hybrid keyword + semantic search for prompts
-- \`list_prompts\` - Browse prompts by source (local/onchain)
-- \`get_prompt\` - Get full prompt content by key
-- \`builder_recommend\` - AI-powered prompt suggestions based on intent
-- \`builder_synthesize\` - Create new prompts from a description
+Both take an object: { domain, action, params }
 
-### Skills
-- \`search_skills\` / \`list_skills\` - Find available skills
-- \`get_skill\` - Get skill details and content
-- \`use_skill\` - Activate a skill (auto-provisions required MCP servers)
-- \`sync_skills\` - Sync skills from daemon
+Examples:
+- Find prompts: sage_search { domain: "prompts", action: "search", params: { query: "..." } }
+- Get a prompt: sage_execute { domain: "prompts", action: "get", params: { key: "..." } }
+- Find skills: sage_search { domain: "skills", action: "search", params: { query: "..." } }
+- Activate a skill: sage_execute { domain: "skills", action: "use", params: { key: "..." } }
+- List domains/actions: sage_search { domain: "help", action: "list", params: {} }
 
-### Governance & DAOs
-- \`list_subdaos\` - List available DAOs
-- \`list_proposals\` / \`sage_list_governance_proposals\` - View proposals
-- \`sage_list_governance_votes\` - View vote breakdown
-- \`get_voting_power\` - Check voting power with NFT multipliers
+Hub + meta:
+- Project context: sage_search { domain: "meta", action: "get_project_context", params: {} }
+- Hub list servers: sage_search { domain: "hub", action: "list_servers", params: {} }
+- Hub start server: sage_execute { domain: "hub", action: "start", params: { server_id: "memory" } }`;
 
-### Tips, Bounties & Marketplace
-- \`sage_list_tips\` / \`sage_list_tip_stats\` - Tips activity and stats
-- \`sage_list_bounties\` - Open/completed bounties
-- \`sage_list_bounty_library_additions\` - Pending library merges
+const SAGE_STATUS_CONTEXT = `\n\nPlugin meta-tool:\n- \`sage_status\` - show bridge health + wallet/network context`;
 
-### Chat & Social
-- \`chat_list_rooms\` / \`chat_send\` / \`chat_history\` - Real-time messaging
-- Social follow/unfollow (via CLI)
-
-### RLM (Recursive Language Model)
-- \`rlm_stats\` - RLM statistics and capture counts
-- \`rlm_analyze_captures\` - Analyze captured prompt/response pairs
-- \`rlm_list_patterns\` - Show discovered patterns
-
-### Memory & Knowledge Graph
-- \`memory_create_entities\` / \`memory_search_nodes\` / \`memory_read_graph\` - Knowledge graph ops
-
-### External Tools (via Hub)
-- \`hub_list_servers\` - List available MCP servers (memory, github, brave, etc.)
-- \`hub_start_server\` - Start an MCP server to gain access to its tools
-- \`hub_status\` - Check which servers are currently running
-
-### Plugin Status
-- \`sage_status\` - Check bridge health, connected network, wallet, and tool count
-
-### Best Practices
-1. **Search before implementing** - Use \`search_prompts\` or \`builder_recommend\` to find existing solutions
-2. **Use skills for complex tasks** - Skills bundle prompts + MCP servers for specific workflows
-3. **Start additional servers as needed** - Use \`hub_start_server\` for memory, github, brave search, etc.
-4. **Check skill requirements** - Skills may require specific MCP servers; \`use_skill\` auto-provisions them
-5. **Discover before asking for DAO/CID** - Run \`list_subdaos\`, \`list_libraries\`, and \`search_skills\` first; only ask user for address/CID if unresolved
-6. **Privy login-code fallback** - If auth is stale, use \`sage wallet connect privy --force --device-code\`, then verify with \`sage wallet current\``;
+const SAGE_FULL_CONTEXT = `${SAGE_CONTEXT}${SAGE_STATUS_CONTEXT}`;
 
 /**
  * Minimal type stubs for OpenClaw plugin API.
@@ -161,7 +128,11 @@ function sha256Hex(s: string): string {
 
 type SecurityScanResult = {
   shouldBlock?: boolean;
-  report?: { level?: string; issue_count?: number; issues?: Array<{ rule_id?: string; category?: string; severity?: string }> };
+  report?: {
+    level?: string;
+    issue_count?: number;
+    issues?: Array<{ rule_id?: string; category?: string; severity?: string }>;
+  };
   promptGuard?: { finding?: { detected?: boolean; type?: string; confidence?: number } };
 };
 
@@ -205,26 +176,23 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
   for (const r of items) {
     const key = r.key!.trim();
     const desc = typeof r.description === "string" ? r.description.trim() : "";
-    const origin = typeof r.library === "string" && r.library.trim() ? ` (from ${r.library.trim()})` : "";
-    const servers = Array.isArray(r.mcpServers) && r.mcpServers.length ? ` — requires: ${r.mcpServers.join(", ")}` : "";
-    lines.push(`- \`use_skill\` \`${key}\`${origin}${desc ? `: ${desc}` : ""}${servers}`);
+    const origin =
+      typeof r.library === "string" && r.library.trim() ? ` (from ${r.library.trim()})` : "";
+    const servers =
+      Array.isArray(r.mcpServers) && r.mcpServers.length
+        ? ` — requires: ${r.mcpServers.join(", ")}`
+        : "";
+    lines.push(
+      `- \`sage_execute\` { "domain": "skills", "action": "use", "params": { "key": "${key}" } }${origin}${desc ? `: ${desc}` : ""}${servers}`,
+    );
   }
   return lines.join("\n");
 }
 
-/** Custom server configuration from mcp-servers.toml */
-type CustomServerConfig = {
-  id: string;
-  name: string;
-  description?: string;
-  enabled: boolean;
-  source: {
-    type: "npx" | "node" | "binary";
-    package?: string;
-    path?: string;
-  };
-  extra_args?: string[];
-  env?: Record<string, string>;
+type SageCodeModeRequest = {
+  domain: string;
+  action: string;
+  params?: Record<string, unknown>;
 };
 
 /**
@@ -239,7 +207,9 @@ function jsonSchemaToTypebox(prop: Record<string, unknown>): TSchema {
   // Enum support: string enums become Type.Union of Type.Literal
   if (Array.isArray(prop.enum) && prop.enum.length > 0) {
     const literals = prop.enum
-      .filter((v): v is string | number | boolean => ["string", "number", "boolean"].includes(typeof v))
+      .filter((v): v is string | number | boolean =>
+        ["string", "number", "boolean"].includes(typeof v),
+      )
       .map((v) => Type.Literal(v));
     if (literals.length > 0) {
       return literals.length === 1 ? literals[0] : Type.Union(literals, opts);
@@ -255,7 +225,8 @@ function jsonSchemaToTypebox(prop: Record<string, unknown>): TSchema {
     case "array": {
       // Typed array items
       const items = prop.items as Record<string, unknown> | undefined;
-      const itemType = items && typeof items === "object" ? jsonSchemaToTypebox(items) : Type.Unknown();
+      const itemType =
+        items && typeof items === "object" ? jsonSchemaToTypebox(items) : Type.Unknown();
       return Type.Array(itemType, opts);
     }
     case "object": {
@@ -323,81 +294,35 @@ function toToolResult(mcpResult: unknown) {
 /**
  * Load custom server configurations from ~/.config/sage/mcp-servers.toml
  */
-function loadCustomServers(): CustomServerConfig[] {
-  const configPath = join(homedir(), ".config", "sage", "mcp-servers.toml");
-
-  if (!existsSync(configPath)) {
-    return [];
+async function sageSearch(req: SageCodeModeRequest): Promise<unknown> {
+  if (!sageBridge?.isReady()) {
+    throw new Error(
+      "MCP bridge not connected. The sage subprocess may have crashed — try restarting the plugin.",
+    );
   }
-
-  try {
-    const content = readFileSync(configPath, "utf8");
-    const config = TOML.parse(content) as {
-      custom?: Record<string, {
-        id: string;
-        name: string;
-        description?: string;
-        enabled: boolean;
-        source: { type: string; package?: string; path?: string };
-        extra_args?: string[];
-        env?: Record<string, string>;
-      }>;
-    };
-
-    if (!config.custom) {
-      return [];
-    }
-
-    return Object.values(config.custom)
-      .filter((s) => s.enabled)
-      .map((s) => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        enabled: s.enabled,
-        source: {
-          type: s.source.type as "npx" | "node" | "binary",
-          package: s.source.package,
-          path: s.source.path,
-        },
-        extra_args: s.extra_args,
-        env: s.env,
-      }));
-  } catch (err) {
-    console.error(`Failed to parse mcp-servers.toml: ${err}`);
-    return [];
-  }
+  return sageBridge.callTool("sage_search", {
+    domain: req.domain,
+    action: req.action,
+    params: req.params ?? {},
+  });
 }
 
-/**
- * Create command and args for spawning an external server
- */
-function getServerCommand(server: CustomServerConfig): { command: string; args: string[] } {
-  switch (server.source.type) {
-    case "npx":
-      return {
-        command: "npx",
-        args: ["-y", server.source.package!, ...(server.extra_args || [])],
-      };
-    case "node":
-      return {
-        command: "node",
-        args: [server.source.path!, ...(server.extra_args || [])],
-      };
-    case "binary":
-      return {
-        command: server.source.path!,
-        args: server.extra_args || [],
-      };
-    default:
-      throw new Error(`Unknown source type: ${server.source.type}`);
+async function sageExecute(req: SageCodeModeRequest): Promise<unknown> {
+  if (!sageBridge?.isReady()) {
+    throw new Error(
+      "MCP bridge not connected. The sage subprocess may have crashed — try restarting the plugin.",
+    );
   }
+  return sageBridge.callTool("sage_execute", {
+    domain: req.domain,
+    action: req.action,
+    params: req.params ?? {},
+  });
 }
 
 // ── Plugin Definition ────────────────────────────────────────────────────────
 
 let sageBridge: McpBridge | null = null;
-const externalBridges: Map<string, McpBridge> = new Map();
 
 const plugin = {
   id: "openclaw-sage",
@@ -408,12 +333,14 @@ const plugin = {
 
   register(api: PluginApi) {
     const pluginCfg = api.pluginConfig ?? {};
-    const sageBinary = typeof pluginCfg.sageBinary === "string" && pluginCfg.sageBinary.trim()
-      ? pluginCfg.sageBinary.trim()
-      : "sage";
-    const sageProfile = typeof pluginCfg.sageProfile === "string" && pluginCfg.sageProfile.trim()
-      ? pluginCfg.sageProfile.trim()
-      : undefined;
+    const sageBinary =
+      typeof pluginCfg.sageBinary === "string" && pluginCfg.sageBinary.trim()
+        ? pluginCfg.sageBinary.trim()
+        : "sage";
+    const sageProfile =
+      typeof pluginCfg.sageProfile === "string" && pluginCfg.sageProfile.trim()
+        ? pluginCfg.sageProfile.trim()
+        : undefined;
 
     const autoInject = pluginCfg.autoInjectContext !== false;
     const autoSuggest = pluginCfg.autoSuggestSkills !== false;
@@ -430,17 +357,21 @@ const plugin = {
     const injectionGuardScanGetPrompt = injectionGuardEnabled
       ? pluginCfg.injectionGuardScanGetPrompt !== false
       : false;
-    const injectionGuardUsePromptGuard = injectionGuardEnabled && pluginCfg.injectionGuardUsePromptGuard === true;
+    const injectionGuardUsePromptGuard =
+      injectionGuardEnabled && pluginCfg.injectionGuardUsePromptGuard === true;
     const injectionGuardMaxChars = clampInt(pluginCfg.injectionGuardMaxChars, 32_768, 256, 200_000);
-    const injectionGuardIncludeEvidence = injectionGuardEnabled && pluginCfg.injectionGuardIncludeEvidence === true;
+    const injectionGuardIncludeEvidence =
+      injectionGuardEnabled && pluginCfg.injectionGuardIncludeEvidence === true;
 
     // Soul stream sync: read locally-synced soul document if configured
-    const soulStreamDao = typeof pluginCfg.soulStreamDao === "string" && pluginCfg.soulStreamDao.trim()
-      ? pluginCfg.soulStreamDao.trim().toLowerCase()
-      : "";
-    const soulStreamLibraryId = typeof pluginCfg.soulStreamLibraryId === "string" && pluginCfg.soulStreamLibraryId.trim()
-      ? pluginCfg.soulStreamLibraryId.trim()
-      : "soul";
+    const soulStreamDao =
+      typeof pluginCfg.soulStreamDao === "string" && pluginCfg.soulStreamDao.trim()
+        ? pluginCfg.soulStreamDao.trim().toLowerCase()
+        : "";
+    const soulStreamLibraryId =
+      typeof pluginCfg.soulStreamLibraryId === "string" && pluginCfg.soulStreamLibraryId.trim()
+        ? pluginCfg.soulStreamLibraryId.trim()
+        : "soul";
 
     const scanCache = new Map<string, { ts: number; scan: SecurityScanResult }>();
     const SCAN_CACHE_LIMIT = 256;
@@ -457,12 +388,16 @@ const plugin = {
       if (cached && now - cached.ts < SCAN_CACHE_TTL_MS) return cached.scan;
 
       try {
-        const raw = await sageBridge.callTool("security_scan_text", {
-          text: trimmed,
-          maxChars: injectionGuardMaxChars,
-          maxEvidenceLen: 100,
-          includeEvidence: injectionGuardIncludeEvidence,
-          usePromptGuard: injectionGuardUsePromptGuard,
+        const raw = await sageSearch({
+          domain: "security",
+          action: "scan",
+          params: {
+            text: trimmed,
+            maxChars: injectionGuardMaxChars,
+            maxEvidenceLen: 100,
+            includeEvidence: injectionGuardIncludeEvidence,
+            usePromptGuard: injectionGuardUsePromptGuard,
+          },
         });
         const json = extractJsonFromMcpResult(raw) as any;
         const scan: SecurityScanResult = (json && typeof json === "object" ? json : {}) as any;
@@ -489,9 +424,14 @@ const plugin = {
     };
     // Pass through Sage-specific env vars when set
     const passthroughVars = [
-      "SAGE_PROFILE", "SAGE_PAY_TO_PIN", "SAGE_IPFS_WORKER_URL",
-      "SAGE_IPFS_UPLOAD_TOKEN", "SAGE_API_URL", "SAGE_HOME",
-      "KEYSTORE_PASSWORD", "SAGE_PROMPT_GUARD_API_KEY",
+      "SAGE_PROFILE",
+      "SAGE_PAY_TO_PIN",
+      "SAGE_IPFS_WORKER_URL",
+      "SAGE_IPFS_UPLOAD_TOKEN",
+      "SAGE_API_URL",
+      "SAGE_HOME",
+      "KEYSTORE_PASSWORD",
+      "SAGE_PROMPT_GUARD_API_KEY",
     ];
     for (const key of passthroughVars) {
       if (process.env[key]) sageEnv[key] = process.env[key]!;
@@ -517,15 +457,13 @@ const plugin = {
           ctx.logger.info("Sage MCP bridge ready");
 
           const tools = await sageBridge!.listTools();
-          ctx.logger.info(`Discovered ${tools.length} internal MCP tools`);
+          ctx.logger.info(`Discovered ${tools.length} Sage MCP tools`);
 
-          for (const tool of tools) {
-            registerMcpTool(api, "sage", sageBridge!, tool, {
-              injectionGuardScanGetPrompt,
-              injectionGuardMode,
-              scanText,
-            });
-          }
+          registerCodeModeTools(api, {
+            injectionGuardScanGetPrompt,
+            injectionGuardMode,
+            scanText,
+          });
 
           // Register sage_status meta-tool for bridge health reporting
           registerStatusTool(api, tools.length);
@@ -534,50 +472,9 @@ const plugin = {
             `Failed to start sage MCP bridge: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
-
-        // Load and start external servers
-        const customServers = loadCustomServers();
-        ctx.logger.info(`Found ${customServers.length} custom external servers`);
-
-        for (const server of customServers) {
-          try {
-            ctx.logger.info(`Starting external server: ${server.name} (${server.id})`);
-
-            const { command, args } = getServerCommand(server);
-            const bridge = new McpBridge(command, args, server.env);
-
-            bridge.on("log", (line: string) => ctx.logger.info(`[${server.id}] ${line}`));
-            bridge.on("error", (err: Error) => ctx.logger.error(`[${server.id}] ${err.message}`));
-
-            await bridge.start();
-            externalBridges.set(server.id, bridge);
-
-            const tools = await bridge.listTools();
-            ctx.logger.info(`[${server.id}] Discovered ${tools.length} tools`);
-
-            for (const tool of tools) {
-              registerMcpTool(api, server.id.replace(/-/g, "_"), bridge, tool, {
-                injectionGuardScanGetPrompt: false,
-                injectionGuardMode: "warn",
-                scanText,
-              });
-            }
-          } catch (err) {
-            ctx.logger.error(
-              `Failed to start ${server.name}: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
       },
       stop: async (ctx) => {
         ctx.logger.info("Stopping Sage MCP bridges...");
-
-        // Stop external bridges
-        for (const [id, bridge] of externalBridges) {
-          ctx.logger.info(`Stopping ${id}...`);
-          await bridge.stop();
-        }
-        externalBridges.clear();
 
         // Stop main sage bridge
         await sageBridge?.stop();
@@ -608,7 +505,12 @@ const plugin = {
       let soulContent = "";
       if (soulStreamDao) {
         const xdgData = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-        const soulPath = join(xdgData, "sage", "souls", `${soulStreamDao}-${soulStreamLibraryId}.md`);
+        const soulPath = join(
+          xdgData,
+          "sage",
+          "souls",
+          `${soulStreamDao}-${soulStreamLibraryId}.md`,
+        );
         try {
           if (existsSync(soulPath)) {
             soulContent = readFileSync(soulPath, "utf8").trim();
@@ -621,7 +523,7 @@ const plugin = {
       if (!prompt || prompt.length < minPromptLen) {
         const parts: string[] = [];
         if (soulContent) parts.push(soulContent);
-        if (autoInject) parts.push(SAGE_CONTEXT);
+        if (autoInject) parts.push(SAGE_FULL_CONTEXT);
         if (guardNotice) parts.push(guardNotice);
         return parts.length ? { prependContext: parts.join("\n\n") } : undefined;
       }
@@ -629,10 +531,14 @@ const plugin = {
       let suggestBlock = "";
       if (autoSuggest && sageBridge) {
         try {
-          const raw = await sageBridge.callTool("search_skills", {
-            query: prompt,
-            source: "all",
-            limit: Math.max(20, suggestLimit),
+          const raw = await sageSearch({
+            domain: "skills",
+            action: "search",
+            params: {
+              query: prompt,
+              source: "all",
+              limit: Math.max(20, suggestLimit),
+            },
           });
           const json = extractJsonFromMcpResult(raw) as any;
           const results = Array.isArray(json?.results) ? (json.results as SkillSearchResult[]) : [];
@@ -644,7 +550,7 @@ const plugin = {
 
       const parts: string[] = [];
       if (soulContent) parts.push(soulContent);
-      if (autoInject) parts.push(SAGE_CONTEXT);
+      if (autoInject) parts.push(SAGE_FULL_CONTEXT);
       if (guardNotice) parts.push(guardNotice);
       if (suggestBlock) parts.push(suggestBlock);
 
@@ -694,19 +600,22 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
     {
       name: "sage_status",
       label: "Sage: status",
-      description: "Check Sage plugin health: bridge connection, tool count, network profile, and wallet status",
+      description:
+        "Check Sage plugin health: bridge connection, tool count, network profile, and wallet status",
       parameters: Type.Object({}),
       execute: async () => {
         const bridgeReady = sageBridge?.isReady() ?? false;
-        const externalCount = externalBridges.size;
-        const externalIds = Array.from(externalBridges.keys());
 
         // Try to get wallet + network info from sage
         let walletInfo = "unknown";
         let networkInfo = "unknown";
         if (bridgeReady && sageBridge) {
           try {
-            const ctx = await sageBridge.callTool("get_project_context", {});
+            const ctx = await sageSearch({
+              domain: "meta",
+              action: "get_project_context",
+              params: {},
+            });
             const json = extractJsonFromMcpResult(ctx) as any;
             if (json?.wallet?.address) walletInfo = json.wallet.address;
             if (json?.network) networkInfo = json.network;
@@ -719,8 +628,6 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
           pluginVersion: PKG_VERSION,
           bridgeConnected: bridgeReady,
           sageToolCount,
-          externalServerCount: externalCount,
-          externalServers: externalIds,
           wallet: walletInfo,
           network: networkInfo,
           profile: process.env.SAGE_PROFILE || "default",
@@ -736,44 +643,67 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
   );
 }
 
-function registerMcpTool(
+function registerCodeModeTools(
   api: PluginApi,
-  prefix: string,
-  bridge: McpBridge,
-  tool: McpToolDef,
-  opts?: {
+  opts: {
     injectionGuardScanGetPrompt: boolean;
     injectionGuardMode: "warn" | "block";
     scanText: (text: string) => Promise<SecurityScanResult | null>;
   },
 ) {
-  const name = `${prefix}_${tool.name}`;
-  const schema = mcpSchemaToTypebox(tool.inputSchema);
-
-  // Extract category from tool annotations if available
-  const category = typeof tool.annotations?.category === "string"
-    ? tool.annotations.category
-    : undefined;
-  const label = category
-    ? `${prefix}: ${category} / ${tool.name}`
-    : `${prefix}: ${tool.name}`;
+  api.registerTool(
+    {
+      name: "sage_search",
+      label: "Sage: search",
+      description: "Sage code-mode search/discovery (domain/action routing)",
+      parameters: Type.Object({
+        domain: Type.String(),
+        action: Type.String(),
+        params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+      }),
+      execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+        try {
+          const domain = String(params.domain ?? "");
+          const action = String(params.action ?? "");
+          const p =
+            params.params && typeof params.params === "object"
+              ? (params.params as Record<string, unknown>)
+              : {};
+          const result = await sageSearch({ domain, action, params: p });
+          return toToolResult(result);
+        } catch (err) {
+          const enriched = enrichErrorMessage(
+            err instanceof Error ? err : new Error(String(err)),
+            "sage_search",
+          );
+          return toToolResult({ error: enriched });
+        }
+      },
+    },
+    { name: "sage_search", optional: true },
+  );
 
   api.registerTool(
     {
-      name,
-      label,
-      description: tool.description ?? `MCP tool: ${prefix}/${tool.name}`,
-      parameters: schema,
+      name: "sage_execute",
+      label: "Sage: execute",
+      description: "Sage code-mode execute/mutations (domain/action routing)",
+      parameters: Type.Object({
+        domain: Type.String(),
+        action: Type.String(),
+        params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+      }),
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-        if (!bridge.isReady()) {
-          return toToolResult({
-            error: "MCP bridge not connected. The sage subprocess may have crashed — try restarting the plugin.",
-          });
-        }
         try {
-          const result = await bridge.callTool(tool.name, params);
+          const domain = String(params.domain ?? "");
+          const action = String(params.action ?? "");
+          const p =
+            params.params && typeof params.params === "object"
+              ? (params.params as Record<string, unknown>)
+              : {};
+          const result = await sageExecute({ domain, action, params: p });
 
-          if (opts?.injectionGuardScanGetPrompt && tool.name === "get_prompt" && prefix === "sage") {
+          if (opts.injectionGuardScanGetPrompt && domain === "prompts" && action === "get") {
             const json = extractJsonFromMcpResult(result) as any;
             const content =
               typeof json?.prompt?.content === "string"
@@ -792,12 +722,8 @@ function registerMcpTool(
                   );
                 }
 
-                // Warn mode: attach a compact summary to the JSON output.
                 if (json && typeof json === "object") {
-                  json.security = {
-                    shouldBlock: true,
-                    summary,
-                  };
+                  json.security = { shouldBlock: true, summary };
                   return {
                     content: [{ type: "text" as const, text: JSON.stringify(json) }],
                     details: result,
@@ -811,13 +737,13 @@ function registerMcpTool(
         } catch (err) {
           const enriched = enrichErrorMessage(
             err instanceof Error ? err : new Error(String(err)),
-            tool.name,
+            "sage_execute",
           );
           return toToolResult({ error: enriched });
         }
       },
     },
-    { name, optional: true },
+    { name: "sage_execute", optional: true },
   );
 }
 
@@ -825,7 +751,7 @@ export default plugin;
 
 export const __test = {
   PKG_VERSION,
-  SAGE_CONTEXT,
+  SAGE_CONTEXT: SAGE_FULL_CONTEXT,
   normalizePrompt,
   extractJsonFromMcpResult,
   formatSkillSuggestions,
