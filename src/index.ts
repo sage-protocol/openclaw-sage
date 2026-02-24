@@ -1,5 +1,5 @@
 import { Type, type TSchema } from "@sinclair/typebox";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -194,6 +194,128 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
   return lines.join("\n");
 }
 
+function isHeartbeatPrompt(prompt: string): boolean {
+  return (
+    prompt.includes("Sage Protocol Heartbeat") ||
+    prompt.includes("HEARTBEAT_OK") ||
+    prompt.includes("Heartbeat Checklist")
+  );
+}
+
+const heartbeatSuggestState = {
+  lastFullAnalysisTs: 0,
+  lastSuggestions: "",
+};
+
+async function gatherHeartbeatContext(
+  bridge: McpBridge,
+  logger: PluginLogger,
+  maxChars: number,
+): Promise<string> {
+  const parts: string[] = [];
+
+  // 1. Query RLM patterns
+  try {
+    const raw = await bridge.callTool("sage_search", {
+      domain: "rlm",
+      action: "list_patterns",
+      params: {},
+    });
+    const json = extractJsonFromMcpResult(raw);
+    if (json) {
+      parts.push(`RLM patterns: ${JSON.stringify(json)}`);
+    }
+  } catch (err) {
+    logger.warn(
+      `[heartbeat-context] RLM query failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 2. Read recent daily notes (last 2 days)
+  try {
+    const memoryDir = join(homedir(), ".openclaw", "memory");
+    if (existsSync(memoryDir)) {
+      const now = new Date();
+      const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60_000);
+      const files = readdirSync(memoryDir)
+        .filter((f) => /^\d{4}-.*\.md$/.test(f))
+        .sort()
+        .reverse();
+
+      for (const file of files.slice(0, 4)) {
+        const yearMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (yearMatch) {
+          const fileDate = new Date(yearMatch[1]);
+          if (fileDate < twoDaysAgo) continue;
+        }
+        const content = readFileSync(join(memoryDir, file), "utf8").trim();
+        if (content) {
+          parts.push(`--- ${file} ---\n${content}`);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      `[heartbeat-context] memory read failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const combined = parts.join("\n\n");
+  return combined.length > maxChars ? combined.slice(0, maxChars) : combined;
+}
+
+async function searchSkillsForContext(
+  bridge: McpBridge,
+  context: string,
+  suggestLimit: number,
+  logger: PluginLogger,
+): Promise<string> {
+  const results: SkillSearchResult[] = [];
+
+  // Search skills against the context
+  try {
+    const raw = await bridge.callTool("search_skills", {
+      query: context,
+      source: "all",
+      limit: Math.max(20, suggestLimit),
+    });
+    const json = extractJsonFromMcpResult(raw) as any;
+    if (Array.isArray(json?.results)) {
+      results.push(...json.results);
+    }
+  } catch (err) {
+    logger.warn(
+      `[heartbeat-context] skill search failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Also try builder recommendations
+  try {
+    const raw = await bridge.callTool("sage_search", {
+      domain: "builder",
+      action: "recommend",
+      params: { query: context },
+    });
+    const json = extractJsonFromMcpResult(raw) as any;
+    if (Array.isArray(json?.results)) {
+      for (const r of json.results) {
+        if (r?.key && !results.some((e) => e.key === r.key)) {
+          results.push(r);
+        }
+      }
+    }
+  } catch {
+    // Builder recommend is optional — ignore failures
+  }
+
+  if (!results.length) return "";
+
+  const formatted = formatSkillSuggestions(results, suggestLimit);
+  if (!formatted) return "";
+
+  return `## Context-Aware Skill Suggestions\n\n${formatted}`;
+}
+
 function pickFirstString(...values: unknown[]): string {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value.trim();
@@ -331,6 +453,12 @@ const plugin = {
     const suggestLimit = clampInt(pluginCfg.suggestLimit, 3, 1, 10);
     const minPromptLen = clampInt(pluginCfg.minPromptLen, 12, 0, 500);
     const maxPromptBytes = clampInt(pluginCfg.maxPromptBytes, 16_384, 512, 65_536);
+
+    // Heartbeat context-aware suggestions
+    const heartbeatContextSuggest = pluginCfg.heartbeatContextSuggest !== false;
+    const heartbeatSuggestCooldownMs =
+      clampInt(pluginCfg.heartbeatSuggestCooldownMinutes, 90, 10, 1440) * 60_000;
+    const heartbeatContextMaxChars = clampInt(pluginCfg.heartbeatContextMaxChars, 4000, 500, 16_000);
 
     // Injection guard (opt-in)
     const injectionGuardEnabled = pluginCfg.injectionGuardEnabled === true;
@@ -627,7 +755,48 @@ const plugin = {
       }
 
       let suggestBlock = "";
-      if (autoSuggest && sageBridge) {
+      const isHeartbeat = isHeartbeatPrompt(prompt);
+
+      if (isHeartbeat && heartbeatContextSuggest && sageBridge) {
+        // Context-aware suggestions for heartbeat prompts
+        const now = Date.now();
+        const cooldownElapsed =
+          now - heartbeatSuggestState.lastFullAnalysisTs >= heartbeatSuggestCooldownMs;
+
+        if (cooldownElapsed) {
+          // Full analysis: gather context and search skills against real activity
+          api.logger.info("[heartbeat-context] Running full context-aware skill analysis");
+          try {
+            const context = await gatherHeartbeatContext(
+              sageBridge,
+              api.logger,
+              heartbeatContextMaxChars,
+            );
+            if (context) {
+              suggestBlock = await searchSkillsForContext(
+                sageBridge,
+                context,
+                suggestLimit,
+                api.logger,
+              );
+              heartbeatSuggestState.lastFullAnalysisTs = now;
+              heartbeatSuggestState.lastSuggestions = suggestBlock;
+              api.logger.info(
+                `[heartbeat-context] Full analysis complete, ${suggestBlock ? "suggestions found" : "no suggestions"}`,
+              );
+            }
+          } catch (err) {
+            api.logger.warn(
+              `[heartbeat-context] Full analysis failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } else {
+          // Within cooldown: reuse cached suggestions
+          suggestBlock = heartbeatSuggestState.lastSuggestions;
+          api.logger.info("[heartbeat-context] Reusing cached suggestions (within cooldown)");
+        }
+      } else if (autoSuggest && sageBridge) {
+        // Generic suggestion logic for non-heartbeat prompts (unchanged)
         try {
           const raw = await sageBridge.callTool("search_skills", {
             query: prompt,

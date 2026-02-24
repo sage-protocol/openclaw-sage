@@ -90,6 +90,18 @@
       "injectionGuardIncludeEvidence": {
         "type": "boolean",
         "description": "Include evidence snippets in warnings (default: false)"
+      },
+      "heartbeatContextSuggest": {
+        "type": "boolean",
+        "description": "Enable context-aware skill suggestions during heartbeat (default: true)"
+      },
+      "heartbeatSuggestCooldownMinutes": {
+        "type": "number",
+        "description": "Minutes between full heartbeat skill analyses (default: 90, min: 10, max: 1440)"
+      },
+      "heartbeatContextMaxChars": {
+        "type": "number",
+        "description": "Max characters of context to gather from memory/RLM for skill search (default: 4000, min: 500, max: 16000)"
       }
     }
   }
