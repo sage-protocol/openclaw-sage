@@ -60,12 +60,34 @@ Before asking users for DAO/CID, run:
 
 ```bash
 sage governance dao discover --limit 50
-sage library list --discover
+sage library discover
 sage search "<query>" --search-type skills --scope both --limit 20
 sage search "<query>" --search-type libraries --scope remote --limit 20
 ```
 
 If command surface differs across machines, verify with `sage --help` / `sage skill --help` and adapt.
+
+### High-Value CLI Recipes
+
+Use these when users want direct Rust CLI commands:
+
+```bash
+# Library management
+sage library create <name>
+sage library skill add <path> -l <library>
+sage library prompt add <prompt-name> -l <library> --file <path>
+sage library push <library>
+sage library promote <library> --dao 0x... --collection default
+
+# DAO creation
+sage governance dao create --name "My DAO" --description "..." --governance personal
+sage governance dao create --name "Team DAO" --description "..." --governance team --operator 0x...
+sage governance dao create --name "Community DAO" --description "..." --governance community --burn 1500
+
+# Bounty creation
+sage bounties create --title "Task" --description "..." --reward 100 --deadline 7d --subdao 0x...
+sage bounties create --mode direct --assignee 0x... --title "Task" --description "..." --reward 100 --deadline 7d --subdao 0x...
+```
 
 ### Auto-Inject / Auto-Suggest
 
