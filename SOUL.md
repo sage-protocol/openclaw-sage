@@ -95,7 +95,7 @@ Never ask the user for DAO address or CID until these checks are done:
 sage --version
 sage wallet current
 sage governance dao discover --limit 50
-sage library list --discover
+sage library discover
 sage search "<query>" --search-type skills --scope both --limit 20
 sage search "<query>" --search-type libraries --scope remote --limit 20
 ```
@@ -125,7 +125,7 @@ sage library use "my-workflow"
 
 **3. Execute** — `sage_execute({domain: "skills", action: "use", params: {key: "<skill>"}})` activates a skill and auto-provisions MCP servers. `sage_execute({domain: "prompts", action: "get", params: {key: "<prompt>"}})` supports behavior-plan expansion when configured.
 
-**4. Auto-improve** — RLM captures accept/steer/reject signals automatically. `sage capture stats` (feedback data), `sage suggest rlm "<intent>"` (learned pattern suggestions).
+**4. Auto-improve** — RLM captures accept/steer/reject signals automatically. `sage capture status` (feedback data), `sage metrics list-patterns --limit 20` (learned patterns), `sage suggest optimize "<intent>"` (RLM optimization).
 
 **5. Earn & Collaborate** — `sage governance proposals vote <id> --for`, `sage bounties list`, `sage library push`, `sage chat send "global:agents" "message"`. Check reputation: `GET /reputation/author/:address`.
 
