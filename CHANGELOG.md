@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.8](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.7...openclaw-sage-v0.1.8) (2026-03-16)
+
+
+### Features
+
+* cleanup README.md ([e508dc6](https://github.com/sage-protocol/openclaw-sage/commit/e508dc6e648d3e24c5c7d34151f1f8bf9c977555))
+* context-aware skill suggestions during heartbeat ([0777ef1](https://github.com/sage-protocol/openclaw-sage/commit/0777ef11782def8d029482c1b99ea032aa3c0ae0))
+* migrate OpenClaw plugin to code mode tools ([8da4f5d](https://github.com/sage-protocol/openclaw-sage/commit/8da4f5d922b8ad0582427cacd109f76fc29d846c))
+* moving hub tools out of mcp feat ([3176bf8](https://github.com/sage-protocol/openclaw-sage/commit/3176bf82848289dacf9011afbcb37849686959d7))
+* update mcp to work with new codemode ([ab73b72](https://github.com/sage-protocol/openclaw-sage/commit/ab73b7288a1c56961191abe269a9bf4fac59f2a0))
+* updating readme ([2749549](https://github.com/sage-protocol/openclaw-sage/commit/2749549fa59c2a1d67b8205cda4944f7ea8c0970))
+* wire RLM capture hooks + fix double-prefix bug ([7e55890](https://github.com/sage-protocol/openclaw-sage/commit/7e558902a678e0ceb34320c5625b6ad94d0de919))
+
+
+### Bug Fixes
+
+* **docs:** correct sage suggest analyze → sage suggest optimize in SOUL.md ([4e29e38](https://github.com/sage-protocol/openclaw-sage/commit/4e29e38f3080896e269c7cf97bebd90ffc91f2c4))
+* remove dead schema conversion code and update docs for code mode ([b3867fe](https://github.com/sage-protocol/openclaw-sage/commit/b3867fe20f5010a0ff96005305d6b38f2fe957b6))
+
 ## [0.1.7](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.6...openclaw-sage-v0.1.7) (2026-02-14)
 
 
