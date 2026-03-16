@@ -1,16 +1,17 @@
 # Sage Plugin (OpenClaw)
 
-MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode. Spawns the sage MCP server as a child process and routes all tool calls through 3 fixed Code Mode tools.
+MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode. It spawns the Sage MCP server as a child process and registers 3 fixed plugin tools; only external MCP server lifecycle is managed outside the plugin.
 
 ## What It Does
 
-- **Code Mode Gateway** - Spawns `sage mcp start` and routes all calls through `sage_search`/`sage_execute`/`sage_status`
+- **Code Mode Gateway** - Spawns `sage mcp start` and routes plugin calls through `sage_search`/`sage_execute`/`sage_status`
 - **Auto-Context Injection** - Injects Sage tool context and skill suggestions at agent start
 - **Injection Guard** - Optional prompt-injection scanning on outgoing `sage_execute` mutations
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
-- **External Servers** - Access hub-managed external MCP servers via `domain: "external"`
+- **External Servers** - Sage internal tools are available immediately; only external MCP tools require starting servers first via the Sage app, CLI, or raw MCP `hub_*` tools
 
 ## Install
+
 ```bash
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
@@ -18,17 +19,20 @@ openclaw plugins install @sage-protocol/openclaw-sage
 After install, **restart the Gateway** for the plugin to take effect.
 
 ### Verify
+
 ```bash
 openclaw plugins list
 openclaw plugins info openclaw-sage
 ```
 
 ### Update
+
 ```bash
 openclaw plugins update openclaw-sage
 # or update all plugins at once
 openclaw plugins update --all
 ```
+
 ### Login With Code (Privy Device-Code)
 
 If browser OAuth is unreliable, use:
@@ -38,6 +42,7 @@ sage wallet connect privy --device-code
 ```
 
 The CLI prints:
+
 - `verification_uri_complete` (open this first)
 - `verification_uri` + `user_code` (manual fallback)
 
@@ -114,21 +119,27 @@ By default this is **off**.
 ```
 
 Notes:
+
 - `injectionGuardMode=block` blocks `sage_execute` calls whose params are flagged.
 - `injectionGuardScanAgentPrompt` scans the agent's initial prompt at start.
 - `injectionGuardUsePromptGuard` sends text to HuggingFace Prompt Guard if `SAGE_PROMPT_GUARD_API_KEY` is set; keep this off unless you explicitly want third-party scanning.
+- Scanner coverage follows Sage CLI/security rules, so updated prompt-injection patterns in Sage can increase warn/block detections when `injectionGuardEnabled=true`.
 
 ### Avoiding Double Injection
 
-If you also enabled Sage's OpenClaw *internal hook* (installed by `sage init`), both the hook and this plugin can inject Sage context.
+If you also enabled Sage's OpenClaw _internal hook_ (installed by `sage init`), both the hook and this plugin can inject Sage context.
 
 - Recommended: keep the plugin injection on, and disable the internal hook injection via `SAGE_OPENCLAW_INJECT_CONTEXT=0` in your OpenClaw environment.
 
-The internal hook exists mainly for bootstrap-file injection; the plugin is the preferred place for per-run injection and suggestions.
+The internal hook now also scans `command:new` and `command:stop` through `sage security scan-hook` and prepends warnings when suspicious content is detected.
+
+You can disable internal-hook scanning independently with `SAGE_OPENCLAW_SECURITY_SCAN=0`.
+
+The plugin remains the preferred place for per-run injection and suggestions.
 
 ## What It Provides
 
-The plugin registers 3 fixed tools via Code Mode, replacing 60+ dynamic tool registrations:
+The plugin registers 3 fixed tools via Code Mode, replacing 60+ dynamic tool registrations. Sage internal domains work immediately through these tools. Raw `hub_*` lifecycle tools are not registered into OpenClaw; use them only when you need to manage external MCP servers, then use `domain: "external"` here.
 
 ### `sage_search` — Read-only search across all domains
 
@@ -140,7 +151,9 @@ sage_search({domain: "help", action: "list"})  // discover all actions
 sage_search({domain: "external", action: "list_servers"})
 ```
 
-Domains: `prompts`, `skills`, `builder`, `governance`, `chat`, `social`, `rlm`, `library_sync`, `security`, `help`, `external`
+Domains: `prompts`, `skills`, `builder`, `governance`, `chat`, `social`, `rlm`, `library_sync`, `security`, `meta`, `help`, `external`
+
+To manage external MCP servers directly outside OpenClaw, use the Sage app MCP screen, Sage CLI, or the raw MCP server's direct hub tools such as `hub_list_servers`, `hub_start_server`, `hub_status`, and `hub_stop_server`.
 
 ### `sage_execute` — Mutations across any domain or external server
 
@@ -163,6 +176,8 @@ sage_execute({domain: "external", action: "call", params: {tool_name: "search", 
 npm install
 npm run typecheck
 npm test
+# optional real-binary e2e (requires local sage binary)
+npm run test:e2e
 ```
 
 ## License

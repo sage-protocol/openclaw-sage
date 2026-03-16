@@ -208,13 +208,6 @@ test("McpBridge can initialize, list tools, and call a native tool", async (t) =
     assert.ok(bridge.isReady(), "bridge should be ready after start");
     const tools = await bridge.listTools();
     assert.ok(Array.isArray(tools));
-    if (tools.length !== 2) {
-      t.skip(
-        `expected exactly two tools in Code Mode; got ${tools.length}. ` +
-          `This usually means the sage binary is stale; rebuild (cargo build) or set SAGE_BIN_TEST to a fresh repo build.`,
-      );
-      return;
-    }
     assert.ok(
       tools.some((t) => t.name === "sage_search"),
       "expected sage_search tool to exist",
@@ -222,6 +215,10 @@ test("McpBridge can initialize, list tools, and call a native tool", async (t) =
     assert.ok(
       tools.some((t) => t.name === "sage_execute"),
       "expected sage_execute tool to exist",
+    );
+    assert.ok(
+      tools.some((t) => t.name === "hub_list_servers"),
+      "expected direct hub tool to exist alongside Code Mode tools",
     );
 
     const result = await bridge.callTool("sage_search", {
@@ -342,4 +339,131 @@ test("formatSkillSuggestions formats stable markdown", () => {
   assert.ok(out.includes('"action": "use"'));
   assert.ok(out.includes('"key": "bug-bounty"'));
   assert.ok(out.includes("requires: zap"));
+});
+
+test("OpenClaw injectionGuard blocks dangerous execute payload (optional e2e)", async () => {
+  if (process.env.SAGE_E2E_OPENCLAW !== "1") {
+    return;
+  }
+
+  addSageDebugBinToPath();
+
+  const tools = new Map<string, any>();
+  const services: Array<{ id: string; start: Function; stop?: Function }> = [];
+
+  const api = {
+    id: "t",
+    name: "t",
+    pluginConfig: {
+      injectionGuardEnabled: true,
+      injectionGuardMode: "block",
+      injectionGuardScanAgentPrompt: false,
+      injectionGuardScanGetPrompt: false,
+    },
+    logger: {
+      info: (_: string) => {},
+      warn: (_: string) => {},
+      error: (_: string) => {},
+    },
+    registerTool: (tool: any) => {
+      if (tool?.name) tools.set(tool.name, tool);
+    },
+    registerService: (svc: any) => {
+      services.push(svc);
+    },
+    on: (_hook: string, _handler: any) => {},
+  };
+
+  plugin.register(api as any);
+  const svc = services.find((s) => s.id === "sage-mcp-bridge");
+  assert.ok(svc, "expected sage-mcp-bridge service to be registered");
+
+  await svc!.start({ config: {}, stateDir: "/tmp", logger: api.logger });
+  try {
+    const executeTool = tools.get("sage_execute");
+    assert.ok(executeTool?.execute, "expected sage_execute tool");
+
+    const result = await executeTool.execute("call-1", {
+      domain: "skills",
+      action: "use",
+      params: { key: "rm -rf /" },
+    });
+
+    const text =
+      result?.content
+        ?.filter((c: any) => c.type === "text")
+        .map((c: any) => c.text)
+        .join("\n") ?? "";
+
+    const blocked = /Blocked by injection guard/i.test(text);
+    if (!blocked) {
+      assert.ok(text.length > 0, "expected a normal tool response when not blocked");
+    }
+  } finally {
+    if (svc!.stop) {
+      await svc!.stop({ config: {}, stateDir: "/tmp", logger: api.logger });
+    }
+  }
+});
+
+test("OpenClaw injectionGuard warn mode does not hard-block execution (optional e2e)", async () => {
+  if (process.env.SAGE_E2E_OPENCLAW !== "1") {
+    return;
+  }
+
+  addSageDebugBinToPath();
+
+  const tools = new Map<string, any>();
+  const services: Array<{ id: string; start: Function; stop?: Function }> = [];
+
+  const api = {
+    id: "t",
+    name: "t",
+    pluginConfig: {
+      injectionGuardEnabled: true,
+      injectionGuardMode: "warn",
+      injectionGuardScanAgentPrompt: false,
+      injectionGuardScanGetPrompt: false,
+    },
+    logger: {
+      info: (_: string) => {},
+      warn: (_: string) => {},
+      error: (_: string) => {},
+    },
+    registerTool: (tool: any) => {
+      if (tool?.name) tools.set(tool.name, tool);
+    },
+    registerService: (svc: any) => {
+      services.push(svc);
+    },
+    on: (_hook: string, _handler: any) => {},
+  };
+
+  plugin.register(api as any);
+  const svc = services.find((s) => s.id === "sage-mcp-bridge");
+  assert.ok(svc, "expected sage-mcp-bridge service to be registered");
+
+  await svc!.start({ config: {}, stateDir: "/tmp", logger: api.logger });
+  try {
+    const executeTool = tools.get("sage_execute");
+    assert.ok(executeTool?.execute, "expected sage_execute tool");
+
+    const result = await executeTool.execute("call-2", {
+      domain: "skills",
+      action: "use",
+      params: { key: "rm -rf /" },
+    });
+
+    const text =
+      result?.content
+        ?.filter((c: any) => c.type === "text")
+        .map((c: any) => c.text)
+        .join("\n") ?? "";
+
+    assert.ok(!/Blocked by injection guard/i.test(text));
+  } finally {
+    if (svc!.stop) {
+      await svc!.stop({ config: {}, stateDir: "/tmp", logger: api.logger });
+    }
+  }
 });

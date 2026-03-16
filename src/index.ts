@@ -22,19 +22,22 @@ const PKG_VERSION: string = (() => {
 const SAGE_CONTEXT = `## Sage (Code Mode)
 
 You have access to Sage through a consolidated Code Mode interface.
+Sage internal domains are available immediately through Code Mode.
+Only external MCP servers need lifecycle management outside Code Mode: start/stop them with Sage CLI,
+the Sage app, or raw MCP \`hub_*\` tools, then use \`domain: "external"\` here.
 
 ### Core Tools
 - \`sage_search\` — Read-only search across Sage domains. Params: \`{domain, action, params}\`
 - \`sage_execute\` — Mutations across Sage domains. Same params.
 
-Domains: prompts, skills, builder, governance, chat, social, rlm, library_sync, security, meta, hub, help, external
+Domains: prompts, skills, builder, governance, chat, social, rlm, library_sync, security, meta, help, external
 
 Examples:
 - Discover actions: sage_search { domain: "help", action: "list", params: {} }
 - Search prompts: sage_search { domain: "prompts", action: "search", params: { query: "..." } }
 - Use a skill: sage_execute { domain: "skills", action: "use", params: { key: "..." } }
 - Project context: sage_search { domain: "meta", action: "get_project_context", params: {} }
-- List external servers: sage_search { domain: "external", action: "list_servers" }
+- Inspect running external servers: sage_search { domain: "external", action: "list_servers" }
 - Call an external tool (auto-route): sage_execute { domain: "external", action: "call", params: { tool_name: "<tool>", tool_params: {...} } }
 - Execute an external tool (explicit): sage_execute { domain: "external", action: "execute", params: { server_id: "<id>", tool_name: "<tool>", tool_params: {...} } }`;
 
@@ -382,7 +385,6 @@ const SageDomain = Type.Union(
     Type.Literal("library_sync"),
     Type.Literal("security"),
     Type.Literal("meta"),
-    Type.Literal("hub"),
     Type.Literal("help"),
     Type.Literal("external"),
   ],
@@ -529,7 +531,7 @@ const plugin = {
   name: "Sage Protocol",
   version: PKG_VERSION,
   description:
-    "Sage MCP tools for prompt libraries, skills, governance, and on-chain operations (including external servers)",
+    "Sage MCP tools for prompts, skills, governance, and external tool routing after hub-managed servers are started",
 
   register(api: PluginApi) {
     const pluginCfg = api.pluginConfig ?? {};
