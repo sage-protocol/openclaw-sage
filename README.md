@@ -13,6 +13,15 @@ MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode
 ## Install
 
 ```bash
+sage init --openclaw
+```
+
+This is the recommended product path: it installs the bundled OpenClaw plugin, the companion Sage
+skills, and only the scan-only internal hooks.
+
+If you only want the raw plugin package flow, you can still run:
+
+```bash
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
 
@@ -151,7 +160,9 @@ Notes:
 
 If you also enabled Sage's OpenClaw _internal hook_ (installed by `sage init`), both the hook and this plugin can inject Sage context.
 
-- Recommended: keep the plugin injection on, and disable the internal hook injection via `SAGE_OPENCLAW_INJECT_CONTEXT=0` in your OpenClaw environment.
+- `sage init --openclaw` now defaults to plugin-first setup and only installs scan-only hooks, so duplicate injection should not happen by default.
+- Only `sage init --openclaw --mode hooks` installs the legacy `agent:bootstrap` injection hook.
+- If you deliberately re-enable bootstrap injection alongside the plugin, disable it with `SAGE_OPENCLAW_INJECT_CONTEXT=0`.
 
 The internal hook now also scans `command:new` and `command:stop` through `sage security scan-hook` and prepends warnings when suspicious content is detected.
 
