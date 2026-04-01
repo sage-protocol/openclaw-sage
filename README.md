@@ -5,10 +5,35 @@ MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode
 ## What It Does
 
 - **Code Mode Gateway** - Spawns `sage mcp start` and routes plugin calls through `sage_search`/`sage_execute`/`sage_status`
-- **Auto-Context Injection** - Injects Sage tool context and skill suggestions at agent start
+- **Agent Profile (Identity Context)** - Injects wallet, active libraries, and skill counts into every turn so the agent knows who it's working for
+- **Auto-Context Injection** - Injects Sage tool context and skill suggestions via `before_prompt_build` (stable context cacheable by providers) with `before_agent_start` legacy fallback
 - **Injection Guard** - Optional prompt-injection scanning on outgoing `sage_execute` mutations
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
 - **External Servers** - Sage internal tools are available immediately; only external MCP tools require starting servers first via the Sage app, CLI, or raw MCP `hub_*` tools
+
+## Agent Profile (Identity Context)
+
+Every OpenClaw session automatically gets Sage Protocol identity context injected via the `before_prompt_build` hook (with `before_agent_start` legacy fallback). Stable context (protocol description, identity, tool docs) goes in `prependSystemContext` so providers can cache it across turns. Dynamic content (skill suggestions, security guard) goes in `prependContext` and refreshes each turn.
+
+Example of what gets injected:
+
+```
+## Sage Protocol Context
+Sage Protocol is a decentralized network for collaborative prompt, skill, and knowledge
+curation on Base (L2). Skills and prompts live in libraries governed by DAOs. Creators
+and curators earn when their work is used. SXXX is the governance token: hold it to
+vote, create DAOs, and shape the protocol. Burns from activity create deflationary
+pressure — early participants gain governance influence and economic upside as the
+network grows. The more skills published, the more valuable discovery becomes for every
+user and agent.
+
+### Active Identity
+- Wallet: 0x9794...507ca (privy, Base Sepolia)
+- Active libraries (6): sage-entrypoints, impeccable-ui-review, sage-review-foundations, ...
+- Libraries: 10 installed (48 skills, 12 prompts)
+```
+
+The context is fetched from the sage CLI (`wallet current`, `library active`, `library list`) and cached for 60 seconds. If the CLI is unavailable or any query fails, the identity block is silently omitted.
 
 ## Install
 
@@ -41,6 +66,35 @@ openclaw plugins update openclaw-sage
 # or update all plugins at once
 openclaw plugins update --all
 ```
+
+### Auto-Enable
+
+The plugin sets `enabledByDefault: true` in its manifest, so it auto-enables when referenced in `openclaw.json` config without needing a manual `plugins.allow` entry.
+
+### Hook Priority
+
+The `before_prompt_build` hook runs at priority 90 (higher = earlier). This ensures Sage's stable system context (protocol description, wallet identity, tool docs) is the base layer that other plugins build on. Dynamic per-turn content (skill suggestions, security guards) goes in `prependContext`.
+
+### Secrets Management
+
+Sage credentials support OpenClaw's SecretRef system instead of raw environment variables:
+
+```json5
+{
+  "secrets": {
+    "providers": {
+      "default": { "source": "env", "allowlist": ["SAGE_*", "KEYSTORE_*"] }
+    }
+  }
+}
+```
+
+The plugin declares three SecretRef-compatible credentials:
+- `SAGE_IPFS_UPLOAD_TOKEN` — Bearer token for Worker API auth
+- `KEYSTORE_PASSWORD` — Wallet keystore password (non-interactive)
+- `SAGE_DELEGATE_KEYSTORE_PASSWORD` — Delegate keystore password (daemon/operator)
+
+These are resolved through OpenClaw's secret provider chain (env, file, or exec) rather than passed as raw env vars.
 
 ### Login With Code (Privy Device-Code)
 

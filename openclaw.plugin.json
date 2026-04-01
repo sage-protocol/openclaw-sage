@@ -1,5 +1,20 @@
 {
   "id": "openclaw-sage",
+  "enabledByDefault": true,
+  "secretRefs": {
+    "SAGE_IPFS_UPLOAD_TOKEN": {
+      "description": "Bearer token for Sage Worker API authentication",
+      "envKey": "SAGE_IPFS_UPLOAD_TOKEN"
+    },
+    "KEYSTORE_PASSWORD": {
+      "description": "Password for encrypted wallet keystores (non-interactive flows)",
+      "envKey": "KEYSTORE_PASSWORD"
+    },
+    "SAGE_DELEGATE_KEYSTORE_PASSWORD": {
+      "description": "Password for encrypted delegate keystores (daemon/operator flows)",
+      "envKey": "SAGE_DELEGATE_KEYSTORE_PASSWORD"
+    }
+  },
   "uiHints": {
     "sageBinary": {
       "label": "Sage Binary Path",
