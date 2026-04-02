@@ -50,13 +50,14 @@ const SAGE_AUTH_TROUBLESHOOTING = `
 When a Sage command fails with auth or wallet errors:
 
 1. **"Privy wallet is not active"** or **"Reconnect with: sage wallet connect privy"**
-   The Privy session has expired. Tell the user: "Your Privy wallet session expired. Run \`sage wallet connect privy --device-code\` in your terminal, complete the browser auth, then retry."
-   Do NOT retry yourself — browser auth requires user interaction.
+   The Privy session has expired. Run \`sage wallet connect privy --device-code\` yourself.
+   This prints a URL and a user code. Show the user: "Open this URL and enter the code to authenticate: <url>"
+   Then run \`sage wallet privy poll\` to wait for completion. Once polling succeeds, retry the original command.
 
 2. **"delegate key could not be unlocked"** or **"delegate keystore password"**
    A delegation exists but the key can't be unlocked. For off-chain ops (library push, search): the CLI falls back to the direct wallet automatically. If it still fails, it's the Privy session issue above. For on-chain ops (vote, tip, bounty): the user needs SAGE_DELEGATE_KEYSTORE_PASSWORD or interactive unlock.
 
-3. **"No wallet configured"** → User needs: \`sage wallet connect privy --device-code\`
+3. **"No wallet configured"** → Run \`sage wallet connect privy --device-code\` yourself, show the user the auth URL and code, then poll with \`sage wallet privy poll\` until auth completes.
 
 4. **General rule**: Search and inspection do NOT require a wallet. Only mutations (push, vote, tip, publish) require auth. If a read-only command asks for auth, check \`sage_status\` and \`sage wallet current\`.`;
 
