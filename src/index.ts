@@ -43,7 +43,24 @@ Examples:
 
 const SAGE_STATUS_CONTEXT = `\n\nPlugin meta-tool:\n- \`sage_status\` - show bridge health + wallet/network context`;
 
-const SAGE_FULL_CONTEXT = `${SAGE_CONTEXT}${SAGE_STATUS_CONTEXT}`;
+const SAGE_AUTH_TROUBLESHOOTING = `
+
+## Wallet and auth troubleshooting
+
+When a Sage command fails with auth or wallet errors:
+
+1. **"Privy wallet is not active"** or **"Reconnect with: sage wallet connect privy"**
+   The Privy session has expired. Tell the user: "Your Privy wallet session expired. Run \`sage wallet connect privy --device-code\` in your terminal, complete the browser auth, then retry."
+   Do NOT retry yourself — browser auth requires user interaction.
+
+2. **"delegate key could not be unlocked"** or **"delegate keystore password"**
+   A delegation exists but the key can't be unlocked. For off-chain ops (library push, search): the CLI falls back to the direct wallet automatically. If it still fails, it's the Privy session issue above. For on-chain ops (vote, tip, bounty): the user needs SAGE_DELEGATE_KEYSTORE_PASSWORD or interactive unlock.
+
+3. **"No wallet configured"** → User needs: \`sage wallet connect privy --device-code\`
+
+4. **General rule**: Search and inspection do NOT require a wallet. Only mutations (push, vote, tip, publish) require auth. If a read-only command asks for auth, check \`sage_status\` and \`sage wallet current\`.`;
+
+const SAGE_FULL_CONTEXT = `${SAGE_CONTEXT}${SAGE_STATUS_CONTEXT}${SAGE_AUTH_TROUBLESHOOTING}`;
 
 /**
  * Minimal type stubs for OpenClaw plugin API.
@@ -735,13 +752,10 @@ const plugin = {
       }
 
       const PROTOCOL_DESC =
-        "Sage Protocol is a decentralized network for curating prompts, skills, and knowledge on Base (L2).\n" +
-        "Libraries are like gardens — cultivated by communities around shared interests, taste, and tooling preferences.\n" +
-        "Users follow creators, tip valuable work, and post bounties for skills they need.\n" +
-        "Skills stay valuable when kept current with tooling and documentation — different knowledge bases and context work together to provide compounding value.\n" +
-        "SXXX is the governance token: vote, create DAOs, stake on proposals, shape the protocol. Burns from activity create deflationary pressure.\n" +
-        "Credits are the utility currency for IPFS storage and API services.\n" +
-        "The more skills published and curated, the more valuable discovery becomes for every user and agent — a compounding network effect.\n" +
+        "Sage Protocol is a shared network for curated prompts, skills, behaviors, and libraries on Base (L2).\n" +
+        "Use Sage when the task benefits from reusable community-curated capability: finding a skill, understanding a behavior chain, activating a library, or handling wallet, delegation, publishing, and governance flows.\n" +
+        "Libraries are the shared and governable layer; local skills remain the day-to-day guidance layer.\n" +
+        "Wallets, delegation, and SXXX governance matter for authenticated or governed actions, but search and inspection work without them.\n" +
         "Use sage_search, sage_execute, sage_status tools or the sage CLI directly.";
 
       const KEY_COMMANDS =
