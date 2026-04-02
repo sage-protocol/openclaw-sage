@@ -691,12 +691,22 @@ const plugin = {
       if (walletOut) {
         const addrMatch = walletOut.match(/Address:\s*(0x[a-fA-F0-9]+)/i);
         const typeMatch = walletOut.match(/Type:\s*(\S+)/i);
+        const delegationMatch = walletOut.match(/Active on-chain delegation:\s*(.+)/i);
+        const delegatorMatch = walletOut.match(/Delegator:\s*(0x[a-fA-F0-9]+)/i);
+        const delegateSignerMatch = walletOut.match(/Delegate signer:\s*(0x[a-fA-F0-9]+)/i);
         const chainMatch = walletOut.match(/Chain(?:\s*ID)?:\s*(\S+)/i);
         if (addrMatch) {
           const addr = addrMatch[1];
           const walletType = typeMatch?.[1] ?? "unknown";
           const network = chainMatch?.[1] === "8453" ? "Base Mainnet" : chainMatch?.[1] === "84532" ? "Base Sepolia" : "";
           lines.push(`- Wallet: ${addr.slice(0, 10)}...${addr.slice(-4)} (${walletType}${network ? `, ${network}` : ""})`);
+        }
+        if (delegationMatch && delegatorMatch && delegateSignerMatch) {
+          const delegator = delegatorMatch[1];
+          const delegate = delegateSignerMatch[1];
+          lines.push(
+            `- On-chain delegation: ${delegationMatch[1].trim()} via ${delegate.slice(0, 10)}...${delegate.slice(-4)} for ${delegator.slice(0, 10)}...${delegator.slice(-4)}`,
+          );
         }
       }
 
