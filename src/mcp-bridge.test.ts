@@ -284,7 +284,7 @@ test("OpenClaw plugin registers MCP tools via sage mcp start", async () => {
   }
 });
 
-test("OpenClaw plugin registers before_agent_start hook and returns prependContext", async () => {
+test("OpenClaw plugin registers before_prompt_build hook and returns context blocks", async () => {
   const hooks: Record<string, any> = {};
 
   const api = {
@@ -304,17 +304,18 @@ test("OpenClaw plugin registers before_agent_start hook and returns prependConte
   };
 
   plugin.register(api as any);
-  assert.ok(typeof hooks.before_agent_start === "function", "expected before_agent_start hook");
-  assert.ok(
-    typeof hooks.after_agent_response === "function" || typeof hooks.agent_end === "function",
-    "expected a response capture hook (after_agent_response or agent_end)",
-  );
+  assert.ok(typeof hooks.before_prompt_build === "function", "expected before_prompt_build hook");
+  assert.ok(typeof hooks.agent_end === "function", "expected agent_end capture hook");
 
-  const result = await hooks.before_agent_start({ prompt: "build an mcp server" });
+  const result = await hooks.before_prompt_build({ prompt: "build an mcp server" });
   assert.ok(result && typeof result === "object");
   assert.ok(
-    typeof result.prependContext === "string" && result.prependContext.includes("Sage (Code Mode)"),
-    "expected prependContext with Sage Code Mode context",
+    typeof result.prependSystemContext === "string" && result.prependSystemContext.includes("Sage (Code Mode)"),
+    "expected prependSystemContext with Sage Code Mode context",
+  );
+  assert.ok(
+    result.prependContext == null || typeof result.prependContext === "string",
+    "expected optional prependContext for dynamic suggestions/guards",
   );
 });
 

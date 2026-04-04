@@ -6,14 +6,14 @@ MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode
 
 - **Code Mode Gateway** - Spawns `sage mcp start` and routes plugin calls through `sage_search`/`sage_execute`/`sage_status`
 - **Agent Profile (Identity Context)** - Injects wallet, active libraries, and skill counts into every turn so the agent knows who it's working for
-- **Auto-Context Injection** - Injects Sage tool context and skill suggestions via `before_prompt_build` (stable context cacheable by providers) with `before_agent_start` legacy fallback
+- **Auto-Context Injection** - Injects Sage tool context and skill suggestions via `before_prompt_build` with stable context cached separately from per-turn dynamic context
 - **Injection Guard** - Optional prompt-injection scanning on outgoing `sage_execute` mutations
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
 - **External Servers** - Sage internal tools are available immediately; only external MCP tools require starting servers first via the Sage app, CLI, or raw MCP `hub_*` tools
 
 ## Agent Profile (Identity Context)
 
-Every OpenClaw session automatically gets Sage Protocol identity context injected via the `before_prompt_build` hook (with `before_agent_start` legacy fallback). Stable context (protocol description, identity, tool docs) goes in `prependSystemContext` so providers can cache it across turns. Dynamic content (skill suggestions, security guard) goes in `prependContext` and refreshes each turn.
+Every OpenClaw session automatically gets Sage Protocol identity context injected via the `before_prompt_build` hook. Stable context (protocol description, identity, tool docs) goes in `prependSystemContext` so providers can cache it across turns. Dynamic content (skill suggestions, security guard) goes in `prependContext` and refreshes each turn.
 
 Example of what gets injected:
 
@@ -51,6 +51,9 @@ openclaw plugins install @sage-protocol/openclaw-sage
 ```
 
 After install, **restart the Gateway** for the plugin to take effect.
+
+CI validates the packed tarball against the latest published `openclaw` CLI by running
+`npx openclaw@latest plugins install` in an isolated `OPENCLAW_HOME`.
 
 ### Verify
 
@@ -159,7 +162,7 @@ sage bounties create --mode direct --assignee 0x... --title "Task" --description
 
 ### Auto-Inject / Auto-Suggest
 
-This plugin uses OpenClaw's plugin hook API to inject context at the start of each agent run (`before_agent_start`).
+This plugin uses OpenClaw's plugin hook API to inject context at the start of each prompt build via `before_prompt_build`.
 
 Available config fields:
 

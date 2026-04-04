@@ -1,23 +1,12 @@
 import { Type, type TSchema } from "@sinclair/typebox";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, dirname } from "node:path";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
 
 import { McpBridge } from "./mcp-bridge.js";
-
-// Read version from package.json at module load time
-const __dirname_compat = dirname(fileURLToPath(import.meta.url));
-const PKG_VERSION: string = (() => {
-  try {
-    const pkg = JSON.parse(readFileSync(resolve(__dirname_compat, "..", "package.json"), "utf8"));
-    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-})();
+import { envGet, loadTextFile, runCommand } from "./runtime.js";
+import { PKG_VERSION } from "./version.js";
 
 const SAGE_CONTEXT = `## Sage (Code Mode)
 
@@ -298,7 +287,7 @@ async function gatherHeartbeatContext(
           const fileDate = new Date(dateMatch[1]);
           if (fileDate < twoDaysAgo) continue;
         }
-        const content = readFileSync(join(memoryDir, file), "utf8").trim();
+        const content = (await loadTextFile(join(memoryDir, file))).trim();
         if (content) parts.push(`--- ${file} ---\n${content}`);
       }
     }
@@ -684,10 +673,10 @@ const plugin = {
     // Build env for sage subprocess — pass through auth/wallet state and profile config
     const sageEnv: Record<string, string> = {
       HOME: homedir(),
-      PATH: process.env.PATH || "",
-      USER: process.env.USER || "",
-      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
-      XDG_DATA_HOME: process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+      PATH: envGet("PATH") || "",
+      USER: envGet("USER") || "",
+      XDG_CONFIG_HOME: envGet("XDG_CONFIG_HOME") || join(homedir(), ".config"),
+      XDG_DATA_HOME: envGet("XDG_DATA_HOME") || join(homedir(), ".local", "share"),
     };
     // Pass through Sage-specific env vars when set
     const passthroughVars = [
@@ -701,7 +690,8 @@ const plugin = {
       "SAGE_PROMPT_GUARD_API_KEY",
     ];
     for (const key of passthroughVars) {
-      if (process.env[key]) sageEnv[key] = process.env[key]!;
+      const value = envGet(key);
+      if (value) sageEnv[key] = value;
     }
     // Config-level profile override takes precedence
     if (sageProfile) sageEnv.SAGE_PROFILE = sageProfile;
@@ -713,17 +703,10 @@ const plugin = {
     let identityCache: { value: string; expiresAt: number } | null = null;
 
     const runSageQuiet = (args: string[]): Promise<string> =>
-      new Promise((resolve) => {
-        const chunks: Buffer[] = [];
-        const child = spawn(sageBinary, args, {
-          env: { ...process.env, ...sageEnv },
-          stdio: ["ignore", "pipe", "ignore"],
-          timeout: 5_000,
-        });
-        child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-        child.on("close", () => resolve(Buffer.concat(chunks).toString("utf8").trim()));
-        child.on("error", () => resolve(""));
-      });
+      runCommand(sageBinary, args, {
+        env: sageEnv,
+        timeout: 5_000,
+      }).then((result) => (result.code === 0 ? result.stdout : ""));
 
     const getIdentityContext = async (): Promise<string> => {
       const now = Date.now();
@@ -810,7 +793,7 @@ const plugin = {
     // ── Capture hooks (best-effort) ───────────────────────────────────
     // These run the CLI capture hook in a child process. They are intentionally
     // non-blocking for agent UX; failures are logged and ignored.
-    const captureHooksEnabled = process.env.SAGE_CAPTURE_HOOKS !== "0";
+    const captureHooksEnabled = envGet("SAGE_CAPTURE_HOOKS") !== "0";
     const CAPTURE_TIMEOUT_MS = 8_000;
     const captureState = {
       sessionId: "",
@@ -824,38 +807,15 @@ const plugin = {
       phase: "prompt" | "response",
       extraEnv: Record<string, string>,
     ): Promise<void> => {
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(sageBinary, ["capture", "hook", phase], {
-          env: { ...process.env, ...sageEnv, ...extraEnv },
-          stdio: ["ignore", "ignore", "pipe"],
-        });
-
-        let stderr = "";
-        child.stderr?.on("data", (chunk) => {
-          stderr += chunk.toString();
-        });
-
-        const timer = setTimeout(() => {
-          child.kill("SIGKILL");
-          reject(new Error(`capture hook timeout (${phase})`));
-        }, CAPTURE_TIMEOUT_MS);
-
-        child.on("error", (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-
-        child.on("close", (code) => {
-          clearTimeout(timer);
-          if (code === 0 || code === null) {
-            resolve();
-            return;
-          }
-          reject(
-            new Error(`capture hook exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`),
-          );
-        });
+      const result = await runCommand(sageBinary, ["capture", "hook", phase], {
+        env: { ...sageEnv, ...extraEnv },
+        timeout: CAPTURE_TIMEOUT_MS,
       });
+
+      if (result.code === 0 || result.code === null) return;
+      throw new Error(
+        `capture hook exited with code ${result.code}${result.stderr ? `: ${result.stderr}` : ""}`,
+      );
     };
 
     const capturePromptFromEvent = (hookName: string, event: any): void => {
@@ -983,16 +943,10 @@ const plugin = {
 
     // ── Context injection ─────────────────────────────────────────────
     //
-    // OpenClaw 2026.3+ prefers `before_prompt_build` over the legacy
-    // `before_agent_start` hook. The new hook supports separate fields:
-    //   - prependSystemContext / appendSystemContext — stable content
-    //     that providers can cache across turns (protocol desc, identity,
-    //     tool docs, soul stream).
-    //   - prependContext — dynamic per-turn content (suggestions, guard
-    //     notices) that changes with each prompt.
-    //
-    // We register both hooks: `before_prompt_build` for new runtimes and
-    // `before_agent_start` as a legacy fallback. Only one fires per turn.
+    // OpenClaw's current typed hook surface uses `before_prompt_build`
+    // for context injection. Stable content goes in system context so
+    // providers can cache it across turns, while dynamic per-turn content
+    // stays in prependContext.
     // ──────────────────────────────────────────────────────────────────
 
     // Shared helper: gather stable system-level context (cacheable across turns)
@@ -1007,11 +961,11 @@ const plugin = {
 
       // Soul stream content
       if (soulStreamDao) {
-        const xdgData = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+        const xdgData = envGet("XDG_DATA_HOME") || join(homedir(), ".local", "share");
         const soulPath = join(xdgData, "sage", "souls", `${soulStreamDao}-${soulStreamLibraryId}.md`);
         try {
           if (existsSync(soulPath)) {
-            const soul = readFileSync(soulPath, "utf8").trim();
+            const soul = (await loadTextFile(soulPath)).trim();
             if (soul) parts.push(soul);
           }
         } catch { /* skip */ }
@@ -1086,8 +1040,6 @@ const plugin = {
       return parts.join("\n\n");
     };
 
-    // Preferred hook (OpenClaw 2026.3+): separates stable system context
-    // from dynamic per-turn content. Providers can cache stable content.
     // Priority 90: run early so Sage's stable context is the base layer
     // that other plugins build on (higher = runs first).
     api.on("before_prompt_build", async (event: any) => {
@@ -1104,27 +1056,6 @@ const plugin = {
       if (dynamicContext) result.prependContext = dynamicContext;
       return Object.keys(result).length ? result : undefined;
     }, { priority: 90 });
-
-    // Legacy fallback (pre-2026.3): flattens everything into prependContext.
-    // Only fires if the runtime doesn't support before_prompt_build.
-    api.on("before_agent_start", async (event: any) => {
-      capturePromptFromEvent("before_agent_start", event);
-      const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
-
-      const [stableContext, dynamicContext] = await Promise.all([
-        buildStableContext(),
-        buildDynamicContext(prompt),
-      ]);
-
-      const parts: string[] = [];
-      if (stableContext) parts.push(stableContext);
-      if (dynamicContext) parts.push(dynamicContext);
-      return parts.length ? { prependContext: parts.join("\n\n") } : undefined;
-    });
-
-    api.on("after_agent_response", async (event: any) => {
-      captureResponseFromEvent("after_agent_response", event);
-    });
 
     // Legacy OpenClaw hook names observed in older runtime builds.
     api.on("message_received", async (event: any) => {
@@ -1206,7 +1137,7 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
           sageToolCount,
           wallet: walletInfo,
           network: networkInfo,
-          profile: process.env.SAGE_PROFILE || "default",
+          profile: envGet("SAGE_PROFILE") || "default",
         };
 
         return {

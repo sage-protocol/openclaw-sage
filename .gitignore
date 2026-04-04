@@ -1,1 +1,9 @@
 node_modules/
+dist/
+.tmp-openclaw-home/
+.tmp-openclaw-home-ci/
+pack.json
+plugin-doctor.txt
+plugin-inspect.json
+plugin-install.txt
+*.tgz

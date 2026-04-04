@@ -28,3 +28,42 @@ jobs:
           # Unit tests that don't need the sage binary will pass;
           # integration tests that need it will be skipped on CI
           NODE_OPTIONS: "--test-only"
+
+  latest-openclaw-install-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build plugin tarball
+        run: npm pack --json > pack.json
+
+      - name: Install plugin into latest OpenClaw
+        env:
+          OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
+        run: |
+          TAR_FILE=$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync("pack.json","utf8"))[0].filename)')
+          set -o pipefail
+          npx --yes openclaw@latest plugins install "./${TAR_FILE}" 2>&1 | tee plugin-install.txt
+          node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-install.txt","utf8"); if (/suspicious code pattern|dangerous code pattern/i.test(text)) throw new Error(`plugin install reported scan warnings:\n${text}`);'
+
+      - name: Verify plugin is discoverable
+        env:
+          OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
+        run: |
+          npx --yes openclaw@latest plugins inspect openclaw-sage --json > plugin-inspect.json
+          node -e 'const fs=require("node:fs"); const data=JSON.parse(fs.readFileSync("plugin-inspect.json","utf8")); if (!data || data.id !== "openclaw-sage") throw new Error("openclaw-sage inspect failed"); if (!String(data.source || "").includes("dist/index.js")) throw new Error(`unexpected plugin source: ${data.source || ""}`);'
+
+      - name: Capture plugin doctor output
+        env:
+          OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
+        run: |
+          npx --yes openclaw@latest plugins doctor > plugin-doctor.txt
+          cat plugin-doctor.txt
+          node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-doctor.txt","utf8"); if (/legacy before_agent_start|unknown typed hook/i.test(text)) throw new Error(`plugin doctor reported legacy compatibility warnings:\n${text}`);'

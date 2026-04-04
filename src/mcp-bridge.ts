@@ -1,7 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+
+import { spawnCommand, type SpawnedProcess } from "./runtime.js";
 
 /** MCP tool definition returned by tools/list */
 export type McpToolDef = {
@@ -37,8 +37,7 @@ const RESTART_DELAY_MS = 1000;
  * Provides methods to list tools and call them.
  */
 export class McpBridge extends EventEmitter {
-  private proc: ChildProcess | null = null;
-  private rl: ReadlineInterface | null = null;
+  private proc: SpawnedProcess | null = null;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private ready = false;
   private retries = 0;
@@ -71,10 +70,6 @@ export class McpBridge extends EventEmitter {
     this.stopped = true;
     this.ready = false;
     this.rejectAll("Bridge stopped");
-    if (this.rl) {
-      this.rl.close();
-      this.rl = null;
-    }
     if (this.proc) {
       this.proc.kill("SIGTERM");
       this.proc = null;
@@ -104,39 +99,38 @@ export class McpBridge extends EventEmitter {
 
   private spawn(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(this.command, this.args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, ...this.env },
-      });
+      void spawnCommand(this.command, this.args, {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: this.env,
+      })
+        .then((proc) => {
+          proc.onError((err) => {
+            if (!this.stopped) {
+              this.handleCrash(err);
+            }
+          });
 
-      proc.on("error", (err) => {
-        if (!this.stopped) {
-          this.handleCrash(err);
-        }
-      });
+          proc.onExit((code) => {
+            if (!this.stopped && code !== 0) {
+              this.handleCrash(new Error(`MCP process exited with code ${code}`));
+            }
+          });
 
-      proc.on("exit", (code) => {
-        if (!this.stopped && code !== 0) {
-          this.handleCrash(new Error(`MCP process exited with code ${code}`));
-        }
-      });
+          if (!proc.stdout || !proc.stdin) {
+            reject(new Error("Failed to open stdio pipes for MCP process"));
+            return;
+          }
 
-      if (!proc.stdout || !proc.stdin) {
-        reject(new Error("Failed to open stdio pipes for MCP process"));
-        return;
-      }
-
-      this.proc = proc;
-
-      this.rl = createInterface({ input: proc.stdout });
-      this.rl.on("line", (line) => this.handleLine(line));
-
-      if (proc.stderr) {
-        const errRl = createInterface({ input: proc.stderr });
-        errRl.on("line", (line) => this.emit("log", line));
-      }
-
-      resolve();
+          this.proc = proc;
+          proc.stdout.onLine((line) => this.handleLine(line));
+          proc.stderr?.onLine((line) => this.emit("log", line));
+          resolve();
+        })
+        .catch((err) => {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        });
     });
   }
 
@@ -155,7 +149,7 @@ export class McpBridge extends EventEmitter {
 
   private request(method: string, params: Record<string, unknown>): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      if (!this.proc?.stdin?.writable) {
+      if (!this.proc?.stdin?.isWritable()) {
         reject(new Error("MCP process not running"));
         return;
       }
@@ -169,7 +163,7 @@ export class McpBridge extends EventEmitter {
   }
 
   private notify(method: string, params: Record<string, unknown>): void {
-    if (!this.proc?.stdin?.writable) return;
+    if (!this.proc?.stdin?.isWritable()) return;
     const msg = { jsonrpc: "2.0", method, params };
     this.proc.stdin.write(JSON.stringify(msg) + "\n");
   }
