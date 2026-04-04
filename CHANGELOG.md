@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.9...openclaw-sage-v0.1.10) (2026-04-04)
+
+
+### Features
+
+* ci improvements and fix openclaw packaging validation and scanner compatibility ([3b7274d](https://github.com/sage-protocol/openclaw-sage/commit/3b7274dda59dcc448e0660eb57107c893bc3aec5))
+
 ## [0.1.9](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.8...openclaw-sage-v0.1.9) (2026-04-04)
 
 
