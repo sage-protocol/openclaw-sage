@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.9](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.8...openclaw-sage-v0.1.9) (2026-04-04)
+
+
+### Features
+
+* enrich openclaw sage context payload ([e2f0f51](https://github.com/sage-protocol/openclaw-sage/commit/e2f0f513ab5836732ed12b048e12f9b268d32695))
+* improve OpenClaw Sage plugin integration ([373139d](https://github.com/sage-protocol/openclaw-sage/commit/373139d7fd5cab6fb8ea8a4ba35eda2f6bcda0ea))
+* surface delegation context in identity summary ([937e674](https://github.com/sage-protocol/openclaw-sage/commit/937e67421fdf20aba4c1c45cb62ef48137b4a8b4))
+
 ## [0.1.8](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.7...openclaw-sage-v0.1.8) (2026-03-16)
 
 
