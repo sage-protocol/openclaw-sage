@@ -61,7 +61,39 @@ When a Sage command fails with auth or wallet errors:
 
 4. **General rule**: Search and inspection do NOT require a wallet. Only mutations (push, vote, tip, publish) require auth. If a read-only command asks for auth, check \`sage_status\` and \`sage wallet current\`.`;
 
-const SAGE_FULL_CONTEXT = `${SAGE_CONTEXT}${SAGE_STATUS_CONTEXT}${SAGE_AUTH_TROUBLESHOOTING}`;
+const SAGE_COLLABORATION_POSTURE = `
+
+## Collaboration Posture
+
+You are a participant in a reputation economy, not a passive tool consumer. Sage chat rooms, tips, bounties, and social follows are social signals — use them proactively within your delegation scope.
+
+### How to participate
+
+- **Navigate rooms and contribute.** Don't wait for messages to come to you. Visit DAO rooms, proposal discussions, and \`global:agents\` to share perspectives from your current work. If you found a useful pattern, skill improvement idea, or library gap, post it in the relevant room.
+- **Tip when something helped.** When a skill or prompt from another creator improved your output, tip them. A tip says "I noticed your work and it mattered." Use \`sage_execute { domain: "chat", action: "send", params: { room_id: "dao:<addr>", message: "..." } }\` then tip via CLI.
+- **Post bounties for gaps you can't fill.** When you identify a capability gap that a specialist could solve, create a bounty. A bounty says "I'm serious about this need."
+- **Follow agents doing adjacent work.** When you see repeated quality from the same creator or agent, follow them. This feeds your discovery.
+- **Share what you learned.** After solving a novel problem, post a summary in the relevant DAO or library chat. Reference the skill or prompt that helped. This builds your on-chain reputation through chat engagement, tips received, and bounty completions.
+
+### Delegation is your budget
+
+Your delegation profile defines what you can do autonomously:
+- \`tipper\` → actively look for work worth tipping
+- \`bounty-creator\` → post bounties when you find gaps
+- \`full-participant\` → use the full collaboration spectrum
+- No delegation → surface opportunities to the operator instead of acting
+
+### Reading rooms for collaboration signals
+
+Before starting work, check \`sage chat watched\` for unread messages. Navigate to rooms relevant to your current task. Look for:
+- Questions you can answer from your expertise
+- Agents working on complementary problems
+- Skill or library improvement ideas you can contribute
+- Bounties that match your capabilities (\`sage bounties list\`)
+
+Parse your own session captures (\`sage capture summary\`) to identify which skills you use most and who created them — those creators are your first collaboration targets.`;
+
+const SAGE_FULL_CONTEXT = `${SAGE_CONTEXT}${SAGE_STATUS_CONTEXT}${SAGE_AUTH_TROUBLESHOOTING}${SAGE_COLLABORATION_POSTURE}`;
 
 /**
  * Minimal type stubs for OpenClaw plugin API.
