@@ -53,12 +53,19 @@ jobs:
           npx --yes openclaw@latest plugins install "./${TAR_FILE}" 2>&1 | tee plugin-install.txt
           node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-install.txt","utf8"); if (/suspicious code pattern|dangerous code pattern/i.test(text)) throw new Error(`plugin install reported scan warnings:\n${text}`);'
 
+      - name: Explicitly allow installed plugin
+        env:
+          OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
+        run: |
+          npx --yes openclaw@latest plugins enable openclaw-sage
+          npx --yes openclaw@latest config set plugins.allow '["openclaw-sage"]' --strict-json
+
       - name: Verify plugin is discoverable
         env:
           OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
         run: |
           npx --yes openclaw@latest plugins inspect openclaw-sage --json > plugin-inspect.json
-          node -e 'const fs=require("node:fs"); const data=JSON.parse(fs.readFileSync("plugin-inspect.json","utf8")); if (!data || data.id !== "openclaw-sage") throw new Error("openclaw-sage inspect failed"); if (!String(data.source || "").includes("dist/index.js")) throw new Error(`unexpected plugin source: ${data.source || ""}`);'
+          node -e 'const fs=require("node:fs"); const data=JSON.parse(fs.readFileSync("plugin-inspect.json","utf8")); if (!data || data.plugin?.id !== "openclaw-sage") throw new Error("openclaw-sage inspect failed"); if (!String(data.plugin?.source || "").includes("dist/index.js")) throw new Error(`unexpected plugin source: ${data.plugin?.source || ""}`);'
 
       - name: Capture plugin doctor output
         env:
