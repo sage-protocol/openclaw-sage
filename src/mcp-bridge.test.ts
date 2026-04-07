@@ -65,6 +65,14 @@ test("plugin.version matches package.json version", () => {
   assert.equal(plugin.version, pkg.version, "plugin.version should match package.json");
 });
 
+test("package uses plugin-managed runtime hooks instead of a bundled hook pack", () => {
+  const root = resolve(new URL("..", import.meta.url).pathname);
+  const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+  assert.equal(pkg.openclaw?.hooks, undefined);
+  assert.equal(existsSync(resolve(root, "hooks", "sage-hook", "HOOK.md")), false);
+  assert.equal(existsSync(resolve(root, "hooks", "sage-hook", "handler.ts")), false);
+});
+
 // ── P1: Schema conversion ────────────────────────────────────────────
 
 test("mcpSchemaToTypebox handles string properties", () => {
@@ -254,6 +262,7 @@ test("OpenClaw plugin registers MCP tools via sage mcp start", async () => {
       services.push(svc);
     },
     on: (_hook: string, _handler: any) => {},
+    registerHook: (_hook: string, _handler: any) => {},
   };
 
   plugin.register(api);
@@ -286,6 +295,7 @@ test("OpenClaw plugin registers MCP tools via sage mcp start", async () => {
 
 test("OpenClaw plugin registers before_prompt_build hook and returns context blocks", async () => {
   const hooks: Record<string, any> = {};
+  const runtimeHooks: Record<string, any> = {};
 
   const api = {
     id: "t",
@@ -301,11 +311,17 @@ test("OpenClaw plugin registers before_prompt_build hook and returns context blo
     on: (hook: string, handler: any) => {
       hooks[hook] = handler;
     },
+    registerHook: (hook: string, handler: any) => {
+      runtimeHooks[hook] = handler;
+    },
   };
 
   plugin.register(api as any);
   assert.ok(typeof hooks.before_prompt_build === "function", "expected before_prompt_build hook");
   assert.ok(typeof hooks.agent_end === "function", "expected agent_end capture hook");
+  assert.ok(typeof runtimeHooks["agent:bootstrap"] === "function");
+  assert.ok(typeof runtimeHooks["command:new"] === "function");
+  assert.ok(typeof runtimeHooks["command:stop"] === "function");
 
   const result = await hooks.before_prompt_build({ prompt: "build an mcp server" });
   assert.ok(result && typeof result === "object");
@@ -373,6 +389,7 @@ test("OpenClaw injectionGuard blocks dangerous execute payload (optional e2e)", 
       services.push(svc);
     },
     on: (_hook: string, _handler: any) => {},
+    registerHook: (_hook: string, _handler: any) => {},
   };
 
   plugin.register(api as any);
@@ -438,6 +455,7 @@ test("OpenClaw injectionGuard warn mode does not hard-block execution (optional 
       services.push(svc);
     },
     on: (_hook: string, _handler: any) => {},
+    registerHook: (_hook: string, _handler: any) => {},
   };
 
   plugin.register(api as any);

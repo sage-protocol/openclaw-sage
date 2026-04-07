@@ -42,7 +42,7 @@ sage init --openclaw
 ```
 
 This is the recommended product path: it installs the bundled OpenClaw plugin, the companion Sage
-skills, and only the scan-only internal hooks.
+skills, and the matching internal Sage/OpenClaw hook behavior.
 
 If you only want the raw plugin package flow, you can still run:
 
@@ -50,10 +50,19 @@ If you only want the raw plugin package flow, you can still run:
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
 
+That direct install now ships both the native OpenClaw plugin and the companion Sage
+plugin-managed internal hooks, including `agent:bootstrap`, `command:new`, and `command:stop`.
+
 After install, **restart the Gateway** for the plugin to take effect.
 
 CI validates the packed tarball against the latest published `openclaw` CLI by running
 `npx openclaw@latest plugins install` in an isolated `OPENCLAW_HOME`.
+
+Current upstream note: `openclaw@latest` (`2026.4.5` at the time of writing) can crash before
+plugin inspection because its root runtime imports `@buape/carbon` without declaring it as a root
+dependency. When that happens, this package still installs to the correct plugin path, but host-side
+commands such as `plugins inspect`, `hooks list`, and `plugins doctor` can fail until OpenClaw fixes
+that release.
 
 ### Verify
 
@@ -216,6 +225,9 @@ Notes:
 ### Avoiding Double Injection
 
 If you also enabled Sage's OpenClaw _internal hook_ (installed by `sage init`), both the hook and this plugin can inject Sage context.
+
+Direct `openclaw plugins install @sage-protocol/openclaw-sage` registers the internal hooks from
+the plugin at runtime, so bootstrap injection is active unless you disable it.
 
 - `sage init --openclaw` now defaults to plugin-first setup and only installs scan-only hooks, so duplicate injection should not happen by default.
 - Only `sage init --openclaw --mode hooks` installs the legacy `agent:bootstrap` injection hook.
