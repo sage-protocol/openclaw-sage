@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.11](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.10...openclaw-sage-v0.1.11) (2026-04-07)
+
+
+### Features
+
+* ci improvements ([67a2c92](https://github.com/sage-protocol/openclaw-sage/commit/67a2c920900e9577148c21cb9e6e7033555b5828))
+* plugin hook logic fixes and install improvements ([30e1d56](https://github.com/sage-protocol/openclaw-sage/commit/30e1d5636a47407bd53fe09d62c1cb2b3ae382fa))
+
 ## [0.1.10](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.9...openclaw-sage-v0.1.10) (2026-04-04)
 
 
