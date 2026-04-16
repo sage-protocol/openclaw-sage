@@ -11,6 +11,24 @@ MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
 - **External Servers** - Sage internal tools are available immediately; only external MCP tools require starting servers first via the Sage app, CLI, or raw MCP `hub_*` tools
 
+## Framework: Thin Harness, Fat Skills
+
+OpenClaw should stay thin at the harness layer:
+
+- fixed bridge tools
+- context injection
+- hook wiring
+- lifecycle and safety guards
+
+The judgment-heavy workflows should live in Sage skills and libraries.
+That means this plugin gives you the bridge/context layer, while `sage init --openclaw`
+adds the small base runtime skill layer (`sage`, `prompt-builder`, `sage-workflow`).
+
+Do not assume that every deeper Sage workflow, long-running operator skill, or entrypoint
+library is automatically active just because the plugin is installed. Those richer
+capabilities should be discoverable or activatable through Sage, not silently hard-coded
+into the OpenClaw harness.
+
 ## Agent Profile (Identity Context)
 
 Every OpenClaw session automatically gets Sage Protocol identity context injected via the `before_prompt_build` hook. Stable context (protocol description, identity, tool docs) goes in `prependSystemContext` so providers can cache it across turns. Dynamic content (skill suggestions, security guard) goes in `prependContext` and refreshes each turn.
@@ -41,8 +59,9 @@ The context is fetched from the sage CLI (`wallet current`, `library active`, `l
 sage init --openclaw
 ```
 
-This is the recommended product path: it installs the bundled OpenClaw plugin, the companion Sage
-skills, and the matching internal Sage/OpenClaw hook behavior.
+This is the recommended product path: it installs the bundled OpenClaw plugin, the base Sage
+runtime skills (`sage`, `prompt-builder`, `sage-workflow`), and the matching internal
+Sage/OpenClaw hook behavior.
 
 If you only want the raw plugin package flow, you can still run:
 
@@ -50,8 +69,9 @@ If you only want the raw plugin package flow, you can still run:
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
 
-That direct install now ships both the native OpenClaw plugin and the companion Sage
-plugin-managed internal hooks, including `agent:bootstrap`, `command:new`, and `command:stop`.
+That direct install ships the native OpenClaw plugin and the plugin-managed internal hooks,
+including `agent:bootstrap`, `command:new`, and `command:stop`.
+It does **not** replace `sage init --openclaw` for installing the base Sage SKILL.md layer.
 
 After install, **restart the Gateway** for the plugin to take effect.
 
