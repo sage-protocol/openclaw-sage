@@ -29,6 +29,23 @@ library is automatically active just because the plugin is installed. Those rich
 capabilities should be discoverable or activatable through Sage, not silently hard-coded
 into the OpenClaw harness.
 
+## Distribution Surface Taxonomy
+
+OpenClaw sessions should treat Sage distribution surfaces as distinct:
+
+- **P2P** — trusted private sync across machines/agents
+- **Shared library** — private collaboration with explicit members/invites
+- **Personal cloud** — creator-controlled canonical publishing, public or private
+- **Marketplace** — monetized packaged capability built from a polished public personal library
+- **DAO promotion** — group/community canon with governance history, legitimacy, future tips/bounties, and repeated improvement
+
+Governance chooser:
+- **personal DAO** = fastest operator-controlled canon
+- **team DAO** = trusted shared stewardship
+- **community DAO** = strongest public curation and legitimacy
+
+If one path is clearly implied by the user's goal, suggest it proactively instead of waiting for the exact Sage term.
+
 ## Agent Profile (Identity Context)
 
 Every OpenClaw session automatically gets Sage Protocol identity context injected via the `before_prompt_build` hook. Stable context (protocol description, identity, tool docs) goes in `prependSystemContext` so providers can cache it across turns. Dynamic content (skill suggestions, security guard) goes in `prependContext` and refreshes each turn.

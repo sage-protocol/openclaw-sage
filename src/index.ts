@@ -28,7 +28,27 @@ Examples:
 - Project context: sage_search { domain: "meta", action: "get_project_context", params: {} }
 - Inspect running external servers: sage_search { domain: "external", action: "list_servers" }
 - Call an external tool (auto-route): sage_execute { domain: "external", action: "call", params: { tool_name: "<tool>", tool_params: {...} } }
-- Execute an external tool (explicit): sage_execute { domain: "external", action: "execute", params: { server_id: "<id>", tool_name: "<tool>", tool_params: {...} } }`;
+- Execute an external tool (explicit): sage_execute { domain: "external", action: "execute", params: { server_id: "<id>", tool_name: "<tool>", tool_params: {...} } }
+
+### Choose a Sage distribution surface by intent
+- **P2P** — sync trusted machines/agents privately.
+- **Shared library** — collaborate privately with explicit members/invites.
+- **Personal cloud** — publish a creator-controlled canonical library, public or private.
+- **Marketplace** — sell a polished public personal library as a packaged capability.
+- **DAO promotion** — make a library canonical for a group/community and unlock curation, legitimacy, on-chain reputation, tips, bounties, and community-driven improvement.
+
+**Governance chooser**
+- **personal DAO** — fastest operator-controlled canon
+- **team DAO** — trusted shared stewardship
+- **community DAO** — strongest public curation and legitimacy
+
+Quick heuristics:
+- **direct share** / **share privately** → shared library
+- trusted fleet propagation → P2P
+- creator-controlled hosting → personal cloud
+- sell this → public personal cloud + marketplace
+- make this the accepted version → DAO promotion
+- if one path is clearly implied, proactively suggest it instead of waiting for the user to name the exact Sage term`;
 
 const SAGE_STATUS_CONTEXT = `\n\nPlugin meta-tool:\n- \`sage_status\` - show bridge health + wallet/network context`;
 
@@ -775,6 +795,8 @@ const plugin = {
       const PROTOCOL_DESC =
         "Sage Protocol is a shared network for curated prompts, skills, behaviors, and libraries on Base (L2).\n" +
         "Use Sage when the task benefits from reusable community-curated capability: finding a skill, understanding a behavior chain, activating a library, or handling wallet, delegation, publishing, and governance flows.\n" +
+        "Choose the distribution surface by intent: P2P for trusted private sync, shared libraries for private collaboration, personal cloud for creator-controlled canonical publishing, marketplace for monetized packaged capability, and DAO promotion for community canon plus legitimacy/reputation loops.\n" +
+        "Governance chooser: personal DAO = fastest operator-controlled canon, team DAO = trusted shared stewardship, community DAO = strongest public curation and legitimacy.\n" +
         "Libraries are the shared and governable layer; local skills remain the day-to-day guidance layer.\n" +
         "Wallets, delegation, and SXXX governance matter for authenticated or governed actions, but search and inspection work without them.\n" +
         "Use sage_search, sage_execute, sage_status tools or the sage CLI directly.";
