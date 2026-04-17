@@ -145,7 +145,9 @@ The plugin declares three SecretRef-compatible credentials:
 
 These are resolved through OpenClaw's secret provider chain (env, file, or exec) rather than passed as raw env vars.
 
-### Login With Code (Privy Device-Code)
+### Login With Code (Privy Device-Code fallback)
+
+Use this only when the user explicitly wants a Privy/provider-session path or the failing session is already clearly a Privy session. If the user already has a working direct-wallet preference, preserve it instead of forcing this flow.
 
 If browser OAuth is unreliable, use:
 

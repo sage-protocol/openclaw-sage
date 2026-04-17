@@ -69,7 +69,9 @@ OpenClaw loads skills from:
 ~/.openclaw/workspace/skills/
 ```
 
-## Login Code Runbook (Privy)
+## Login Code Runbook (Privy fallback)
+
+Only use this runbook when the user explicitly wants a Privy/provider-session path or the failing session is already clearly a Privy session. If the user already has a working direct-wallet preference, preserve it instead of forcing this flow.
 
 When a user asks to log in with a login code, use this exact flow:
 
@@ -167,6 +169,6 @@ This is not optional. An agent that checks heartbeat but never evaluates its own
 ## Guardrails
 
 - Don't instruct `git push`, key export, or any destructive command unless the user explicitly asks.
-- Don't ask the user to paste secrets (tokens, private keys). Use `sage wallet connect privy` (OAuth) or documented wallet flows.
+- Don't ask the user to paste secrets (tokens, private keys). Use documented wallet flows instead; preserve the user's working wallet/session preference, and use Privy login-code only when they want a provider-session path or the failing session is already Privy.
 - Prefer the unified `sage suggest ...` family for discovery, but onboarding comes first.
 - Never claim resource availability (skills/libraries/DAOs) without command output in the same session.

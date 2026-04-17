@@ -59,14 +59,17 @@ const SAGE_AUTH_TROUBLESHOOTING = `
 When a Sage command fails with auth or wallet errors:
 
 1. **"Privy wallet is not active"** or **"Reconnect with: sage wallet connect privy"**
-   The Privy session has expired. Run \`sage wallet connect privy --device-code\` yourself.
+   The failing session is already a Privy session. Run \`sage wallet connect privy --device-code\` yourself.
    This prints a URL and a user code. Show the user: "Open this URL and enter the code to authenticate: <url>"
    Then run \`sage wallet privy poll\` to wait for completion. Once polling succeeds, retry the original command.
 
 2. **"delegate key could not be unlocked"** or **"delegate keystore password"**
    A delegation exists but the key can't be unlocked. For off-chain ops (library push, search): the CLI falls back to the direct wallet automatically. If it still fails, it's the Privy session issue above. For on-chain ops (vote, tip, bounty): the user needs SAGE_DELEGATE_KEYSTORE_PASSWORD or interactive unlock.
 
-3. **"No wallet configured"** → Run \`sage wallet connect privy --device-code\` yourself, show the user the auth URL and code, then poll with \`sage wallet privy poll\` until auth completes.
+3. **"No wallet configured"** → First check the user's preferred wallet path. Common options are:
+   - direct wallet: \`sage wallet create <name>\` or \`sage wallet connect ows -n <name>\`
+   - provider-session fallback: \`sage wallet connect privy --device-code\`
+   If you use the Privy fallback, show the user the auth URL and code, then poll with \`sage wallet privy poll\` until auth completes.
 
 4. **General rule**: Search and inspection do NOT require a wallet. Only mutations (push, vote, tip, publish) require auth. If a read-only command asks for auth, check \`sage_status\` and \`sage wallet current\`.`;
 
@@ -1232,7 +1235,7 @@ function enrichErrorMessage(err: Error, toolName: string): string {
 
   // Wallet not configured
   if (/wallet|signer|no.*account|not.*connected/i.test(msg)) {
-    return `${msg}\n\nHint: Run \`sage wallet connect privy\` (or \`sage wallet connect\`) to configure a wallet, or set KEYSTORE_PASSWORD for automated flows.`;
+    return `${msg}\n\nHint: Configure the wallet path the user actually wants:\n  \`sage wallet create <name>\`\n  \`sage wallet connect ows -n <name>\`\n  \`sage wallet connect privy --device-code\` (provider-session fallback)\nOr set KEYSTORE_PASSWORD for automated local-wallet flows.`;
   }
   // Privy session/auth issues
   if (/privy|session.*expired|re-authenticate|wallet session expired/i.test(msg)) {
@@ -1243,7 +1246,7 @@ function enrichErrorMessage(err: Error, toolName: string): string {
     if (/ipfs|upload token|pin|credits/i.test(msg) || /ipfs|upload|pin|credit/i.test(toolName)) {
       return `${msg}\n\nHint: Run \`sage config ipfs setup\` to refresh authentication, or check SAGE_IPFS_UPLOAD_TOKEN.`;
     }
-    return `${msg}\n\nHint: Reconnect wallet auth with:\n  \`sage wallet connect privy --force --device-code\``;
+    return `${msg}\n\nHint: Reconnect the wallet/session path that actually failed. If it was a Privy/provider-session flow, use:\n  \`sage wallet connect privy --force --device-code\`\nIf no wallet is configured yet, prefer the user's chosen direct-wallet path first.`;
   }
   // Network / RPC failures
   if (/rpc|network|timeout|ECONNREFUSED|ENOTFOUND|fetch.*failed/i.test(msg)) {
