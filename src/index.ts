@@ -61,7 +61,7 @@ When a Sage command fails with auth or wallet errors:
 1. **"Privy wallet is not active"** or **"Reconnect with: sage wallet connect privy"**
    The failing session is already a Privy session. Run \`sage wallet connect privy --device-code\` yourself.
    This prints a URL and a user code. Show the user: "Open this URL and enter the code to authenticate: <url>"
-   Then run \`sage wallet privy poll\` to wait for completion. Once polling succeeds, retry the original command.
+   After browser approval, retry the original command. If the session still looks stale, run \`sage wallet connect privy --force --device-code\`.
 
 2. **"delegate key could not be unlocked"** or **"delegate keystore password"**
    A delegation exists but the key can't be unlocked. For off-chain ops (library push, search): the CLI falls back to the direct wallet automatically. If it still fails, it's the Privy session issue above. For on-chain ops (vote, tip, bounty): the user needs SAGE_DELEGATE_KEYSTORE_PASSWORD or interactive unlock.
@@ -69,7 +69,7 @@ When a Sage command fails with auth or wallet errors:
 3. **"No wallet configured"** → First check the user's preferred wallet path. Common options are:
    - direct wallet: \`sage wallet create <name>\` or \`sage wallet connect ows -n <name>\`
    - provider-session fallback: \`sage wallet connect privy --device-code\`
-   If you use the Privy fallback, show the user the auth URL and code, then poll with \`sage wallet privy poll\` until auth completes.
+   If you use the Privy fallback, show the user the auth URL and code, wait for browser approval, then retry the original command (or rerun with \`--force\` if the session is stale).
 
 4. **General rule**: Search and inspection do NOT require a wallet. Only mutations (push, vote, tip, publish) require auth. If a read-only command asks for auth, check \`sage_status\` and \`sage wallet current\`.`;
 
@@ -808,7 +808,7 @@ const plugin = {
         "### Key Commands\n" +
         "- Search: `sage_search({ domain: \"skills\", action: \"search\", params: { query: \"...\" } })` or `sage search \"...\" --search-type skills`\n" +
         "- Use skill: `sage_execute({ domain: \"skills\", action: \"use\", params: { key: \"...\" } })`\n" +
-        "- Tip: `sage tip <address> <amount>` or `sage social tip ...`\n" +
+        "- Tips activity: `sage tips list --recipient 0x...` and `sage tips stats --recipient 0x...`\n" +
         "- Bounty: `sage bounties create --title \"...\" --reward <amount>`\n" +
         "- DAOs: `sage governance dao discover`\n" +
         "- Publish: `sage library push <name>`\n" +
