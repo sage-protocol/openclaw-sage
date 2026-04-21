@@ -22,7 +22,7 @@ OpenClaw should stay thin at the harness layer:
 
 The judgment-heavy workflows should live in Sage skills and libraries.
 That means this plugin gives you the bridge/context layer, while `sage init --openclaw`
-adds the small base runtime skill layer (`sage`, `prompt-builder`, `sage-workflow`).
+adds the small base runtime skill layer (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`).
 
 Do not assume that every deeper Sage workflow, long-running operator skill, or entrypoint
 library is automatically active just because the plugin is installed. Those richer
@@ -77,7 +77,7 @@ sage init --openclaw
 ```
 
 This is the recommended product path: it installs the bundled OpenClaw plugin, the base Sage
-runtime skills (`sage`, `prompt-builder`, `sage-workflow`), and the matching internal
+runtime skills (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`), and the matching internal
 Sage/OpenClaw hook behavior.
 
 If you only want the raw plugin package flow, you can still run:
