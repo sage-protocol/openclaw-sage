@@ -29,6 +29,13 @@ library is automatically active just because the plugin is installed. Those rich
 capabilities should be discoverable or activatable through Sage, not silently hard-coded
 into the OpenClaw harness.
 
+For source-of-truth clarity, separate these layers:
+
+- `packages/openclaw-sage/` is the OpenClaw plugin bridge/context package
+- `packages/sage/skills/` is the human-authored generic Sage core skill tree
+- `packages/sage/crates/cli/src/commands/skills/data/` contains bundled `sage init` templates
+- `packages/sage/crates/cli/src/commands/skills/entry_shared.rs` + `packages/sage/crates/cli/src/commands/skills/data/shared/` provide the shared conceptual sections that keep the bundled generic/Codex/Pi/onboarding `sage` entry surfaces aligned
+
 ## Distribution Surface Taxonomy
 
 OpenClaw sessions should treat Sage distribution surfaces as distinct:
@@ -78,7 +85,7 @@ sage init --openclaw
 
 This is the recommended product path: it installs the bundled OpenClaw plugin, the base Sage
 runtime skills (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`), and the matching internal
-Sage/OpenClaw hook behavior.
+Sage/OpenClaw hook behavior. In that base skill layer, the bundled generic `sage` entry surface is now rendered from the shared entry-source layer in `packages/sage/crates/cli/src/commands/skills/entry_shared.rs` + `packages/sage/crates/cli/src/commands/skills/data/shared/`, so the product framing stays aligned with Codex and Pi instead of drifting by harness.
 
 If you only want the raw plugin package flow, you can still run:
 
