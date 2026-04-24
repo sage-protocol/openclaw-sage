@@ -190,12 +190,15 @@ test("enrichErrorMessage passes through unknown errors", () => {
 
 // ── P2: SAGE_CONTEXT completeness ────────────────────────────────────
 
-test("SAGE_CONTEXT includes all major tool categories", () => {
+test("SAGE_CONTEXT includes all major tool categories and stays thin", () => {
   const ctx = __test.SAGE_CONTEXT;
   assert.ok(ctx.includes("Sage (Code Mode)"), "should include Code Mode header");
   assert.ok(ctx.includes("sage_search"), "should mention sage_search");
   assert.ok(ctx.includes("sage_execute"), "should mention sage_execute");
   assert.ok(ctx.includes("sage_status"), "should mention sage_status");
+  assert.ok(ctx.includes("Context hygiene"), "should include context hygiene guidance");
+  assert.ok(!ctx.includes("Wallet and auth troubleshooting"), "stable context should not preload auth manual");
+  assert.ok(!ctx.includes("Collaboration Posture"), "stable context should not preload collaboration manual");
 });
 
 // ── Existing tests (integration — require sage binary) ───────────────
