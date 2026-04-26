@@ -10,6 +10,7 @@
     "openclaw.plugin.json",
     "README.md",
     "SOUL.md",
+    "AGENTS.md",
     "LICENSE*"
   ],
   "exports": {
