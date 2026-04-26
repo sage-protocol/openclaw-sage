@@ -7,6 +7,7 @@ MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode
 - **Code Mode Gateway** - Spawns `sage mcp start` and routes plugin calls through `sage_search`/`sage_execute`/`sage_status`
 - **Agent Profile (Identity Context)** - Injects wallet, active libraries, and skill counts into every turn so the agent knows who it's working for
 - **Auto-Context Injection** - Injects Sage tool context and skill suggestions via `before_prompt_build` with stable context cached separately from per-turn dynamic context
+- **SOUL.md Posture** - `sage init --openclaw` adds a compact Sage operating posture to `~/.openclaw/workspace/SOUL.md` so agents search, inspect, reuse, and package useful workflows without bloating command context
 - **Injection Guard** - Optional prompt-injection scanning on outgoing `sage_execute` mutations
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
 - **External Servers** - Sage internal tools are available immediately; only external MCP tools require starting servers first via the Sage app, CLI, or raw MCP `hub_*` tools
@@ -61,13 +62,11 @@ Example of what gets injected:
 
 ```
 ## Sage Protocol Context
-Sage Protocol is a decentralized network for collaborative prompt, skill, and knowledge
-curation on Base (L2). Skills and prompts live in libraries governed by DAOs. Creators
-and curators earn when their work is used. SXXX is the governance token: hold it to
-vote, create DAOs, and shape the protocol. Burns from activity create deflationary
-pressure — early participants gain governance influence and economic upside as the
-network grows. The more skills published, the more valuable discovery becomes for every
-user and agent.
+Sage is the skill/library layer for AI agents: search, inspect, activate, and reuse
+workflows with less repeated setup. Useful workflows can become reusable assets with
+discovery, distribution, payments, tips, bounties, reflections, and governed-library
+provenance. Distribution ladder: local skill -> private/shared library -> public
+library -> paid library -> governed canon -> bounties/tips/reflections.
 
 ### Active Identity
 - Wallet: 0x9794...507ca (privy, Base Sepolia)
@@ -84,8 +83,12 @@ sage init --openclaw
 ```
 
 This is the recommended product path: it installs the bundled OpenClaw plugin, the base Sage
-runtime skills (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`), and the matching internal
-Sage/OpenClaw hook behavior. In that base skill layer, the bundled generic `sage` entry surface is now rendered from the shared entry-source layer in `packages/sage/crates/cli/src/commands/skills/entry_shared.rs` + `packages/sage/crates/cli/src/commands/skills/data/shared/`, so the product framing stays aligned with Codex and Pi instead of drifting by harness.
+runtime skills (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`), the compact Sage SOUL.md
+posture block, and the matching internal Sage/OpenClaw hook behavior. In that base skill layer, the
+bundled generic `sage` entry surface is now rendered from the shared entry-source layer in
+`packages/sage/crates/cli/src/commands/skills/entry_shared.rs` +
+`packages/sage/crates/cli/src/commands/skills/data/shared/`, so the product framing stays aligned
+with Codex and Pi instead of drifting by harness.
 
 If you only want the raw plugin package flow, you can still run:
 

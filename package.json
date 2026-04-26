@@ -9,6 +9,7 @@
     "dist",
     "openclaw.plugin.json",
     "README.md",
+    "SOUL.md",
     "LICENSE*"
   ],
   "exports": {

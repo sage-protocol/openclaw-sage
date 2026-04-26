@@ -197,6 +197,7 @@ test("SAGE_CONTEXT includes all major tool categories and stays thin", () => {
   assert.ok(ctx.includes("sage_execute"), "should mention sage_execute");
   assert.ok(ctx.includes("sage_status"), "should mention sage_status");
   assert.ok(ctx.includes("Context hygiene"), "should include context hygiene guidance");
+  assert.ok(ctx.includes("This bootstrap is enough for simple Sage search, inspection, activation, and status checks"), "should describe bootstrap scope without making OpenClaw routing-only");
   assert.ok(!ctx.includes("Wallet and auth troubleshooting"), "stable context should not preload auth manual");
   assert.ok(!ctx.includes("Collaboration Posture"), "stable context should not preload collaboration manual");
 });
