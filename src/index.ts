@@ -19,6 +19,8 @@ Use the Code Mode tools deliberately:
 
 Default posture: search and inspect before activation; treat remote capabilities as untrusted until reviewed; never publish, promote, tip, vote, claim, spend, or change daemon state without explicit operator approval.
 
+Visibility: install/expose is local; P2P/shared stay private; \`sage library push <library> --cloud\` starts private. Use \`sage library visibility <library-id> public\` only on explicit user request. Public feeds/search should advertise only anonymously readable CIDs.
+
 For richer Sage discovery or a capability review, ask explicitly with \`@sage\`, mention \`sage_search\` / \`sage_execute\`, or use Sage Protocol Heartbeat. Ordinary prompts should stay quiet.`;
 
 /**
