@@ -5,8 +5,9 @@ MCP bridge plugin that exposes Sage Protocol tools inside OpenClaw via Code Mode
 ## What It Does
 
 - **Code Mode Gateway** - Spawns `sage mcp start` and routes plugin calls through `sage_search`/`sage_execute`/`sage_status`
-- **Agent Profile (Identity Context)** - Injects wallet, active libraries, and skill counts into every turn so the agent knows who it's working for
-- **Auto-Context Injection** - Injects Sage tool context and skill suggestions via `before_prompt_build` with stable context cached separately from per-turn dynamic context
+- **Agent Profile (Identity Context)** - Injects a compact identity summary when the Sage CLI can provide wallet, active-library, and inventory facts
+- **Quiet Sage Affordance** - Injects a compact Sage capability card so agents know how to ask for Sage discovery without paying for long protocol orientation on ordinary prompts
+- **Explicit Discovery Breakpoints** - Runs richer skill/capability discovery only for explicit Sage prompts (`@sage`, `sage_search`, `sage_execute`), Sage Protocol Heartbeat, or legacy `autoSuggestSkills: true` configuration
 - **SOUL.md Posture** - `sage init --openclaw` adds a compact Sage operating posture to `~/.openclaw/workspace/SOUL.md` so agents search, inspect, reuse, and package useful workflows without bloating command context
 - **Injection Guard** - Optional prompt-injection scanning on outgoing `sage_execute` mutations
 - **Crash Recovery** - Automatically restarts the MCP subprocess on unexpected exits
@@ -23,7 +24,7 @@ OpenClaw should stay thin at the harness layer:
 
 The judgment-heavy workflows should live in Sage skills and libraries.
 That means this plugin gives you the bridge/context layer, while `sage init --openclaw`
-adds the small base runtime skill layer (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`).
+adds the small base runtime skill layer (`sage`, `prompt-builder`, `sage-workflow`).
 
 Do not assume that every deeper Sage workflow, long-running operator skill, or entrypoint
 library is automatically active just because the plugin is installed. Those richer
@@ -56,25 +57,18 @@ If one path is clearly implied by the user's goal, suggest it proactively instea
 
 ## Agent Profile (Identity Context)
 
-Every OpenClaw session automatically gets Sage Protocol identity context injected via the `before_prompt_build` hook. Stable context (protocol description, identity, tool docs) goes in `prependSystemContext` so providers can cache it across turns. Dynamic content (skill suggestions, security guard) goes in `prependContext` and refreshes each turn.
+Every OpenClaw session can receive compact Sage context through the `before_prompt_build` hook. Stable context is limited to the always-on capability affordance and identity summary; dynamic content is reserved for explicit Sage requests, Sage Protocol Heartbeat, security warnings, or legacy `autoSuggestSkills: true` configuration.
 
-Example of what gets injected:
+Example identity fields:
 
-```
-## Sage Protocol Context
-Sage is the skill/library layer for AI agents: search, inspect, activate, and reuse
-workflows with less repeated setup. Useful workflows can become reusable assets with
-discovery, distribution, payments, tips, bounties, reflections, and governed-library
-provenance. Distribution ladder: local skill -> private/shared library -> public
-library -> paid library -> governed canon -> bounties/tips/reflections.
-
-### Active Identity
-- Wallet: 0x9794...507ca (privy, Base Sepolia)
-- Active libraries (6): sage-entrypoints, impeccable-ui-review, sage-review-foundations, ...
-- Libraries: 10 installed (48 skills, 12 prompts)
+```text
+## Sage Protocol Identity
+- Wallet: 0x9794...07CA (privy, Base Sepolia)
+- 2 active libraries
+- 91 libraries, 387 skills, 103 prompts installed
 ```
 
-The context is fetched from the sage CLI (`wallet current`, `library active`, `library list`) and cached for 60 seconds. If the CLI is unavailable or any query fails, the identity block is silently omitted.
+The identity context is fetched from the Sage CLI (`wallet current`, `library active`, `library list`) and cached for 60 seconds. If the CLI is unavailable or any query fails, the identity block is omitted gracefully.
 
 ## Install
 
@@ -82,22 +76,25 @@ The context is fetched from the sage CLI (`wallet current`, `library active`, `l
 sage init --openclaw
 ```
 
-This is the recommended product path: it installs the bundled OpenClaw plugin, the base Sage
-runtime skills (`sage`, `prompt-builder`, `sage-workflow`, `sage-p2p`), the compact Sage SOUL.md
-posture block, and the matching internal Sage/OpenClaw hook behavior. In that base skill layer, the
-bundled generic `sage` entry surface is now rendered from the shared entry-source layer in
-`packages/sage/crates/cli/src/commands/skills/entry_shared.rs` +
+This is the recommended onboarding path: it installs the base Sage runtime skills (`sage`,
+`prompt-builder`, `sage-workflow`), the compact Sage SOUL.md posture block, and an embedded
+OpenClaw bridge plugin template. The embedded `sage init` plugin template is intentionally smaller
+than the published package plugin: it exposes the Code Mode bridge and emit-only capture hooks, but
+it does not implement the package plugin's `before_prompt_build` context-injection behavior.
+
+In that base skill layer, the bundled generic `sage` entry surface is now rendered from the shared
+entry-source layer in `packages/sage/crates/cli/src/commands/skills/entry_shared.rs` +
 `packages/sage/crates/cli/src/commands/skills/data/shared/`, so the product framing stays aligned
 with Codex and Pi instead of drifting by harness.
 
-If you only want the raw plugin package flow, you can still run:
+For the native package plugin described in this README, run:
 
 ```bash
 openclaw plugins install @sage-protocol/openclaw-sage
 ```
 
-That direct install ships the native OpenClaw plugin and the plugin-managed internal hooks,
-including `agent:bootstrap`, `command:new`, and `command:stop`.
+That direct install ships the richer OpenClaw plugin package and the plugin-managed internal hooks,
+including `before_prompt_build`, `agent:bootstrap`, `command:new`, and `command:stop`.
 It does **not** replace `sage init --openclaw` for installing the base Sage SKILL.md layer.
 
 After install, **restart the Gateway** for the plugin to take effect.
@@ -132,7 +129,7 @@ The plugin sets `enabledByDefault: true` in its manifest, so it auto-enables whe
 
 ### Hook Priority
 
-The `before_prompt_build` hook runs at priority 90 (higher = earlier). This ensures Sage's stable system context (protocol description, wallet identity, tool docs) is the base layer that other plugins build on. Dynamic per-turn content (skill suggestions, security guards) goes in `prependContext`.
+The `before_prompt_build` hook runs at priority 90 (higher = earlier). This ensures Sage's compact capability card and identity summary form the base layer that other plugins build on. Dynamic per-turn content (explicit/heartbeat skill suggestions and security guards) goes in `prependContext`.
 
 ### Secrets Management
 
@@ -220,23 +217,45 @@ sage bounties create --mode direct --assignee 0x... --title "Task" --description
 
 ### Auto-Inject / Auto-Suggest
 
-This plugin uses OpenClaw's plugin hook API to inject context at the start of each prompt build via `before_prompt_build`.
+The plugin keeps Sage visible without running unsolicited discovery on every ordinary prompt.
 
 Available config fields:
 
 ```json
 {
   "autoInjectContext": true,
-  "autoSuggestSkills": true,
+  "autoSuggestSkills": false,
   "suggestLimit": 3,
   "minPromptLen": 12,
   "maxPromptBytes": 16384
 }
 ```
 
+Behavior:
+
+- `autoInjectContext: true` adds the compact Sage capability affordance and identity summary.
+- `autoSuggestSkills` is quiet by default unless explicitly set to `true`.
+- Normal coding/product prompts do not receive a `## Suggested Skills` block by default.
+- Explicit Sage prompts can still trigger richer discovery: mention `@sage`, `sage_search`, or `sage_execute`.
+- Sage Protocol Heartbeat remains the intended rich-context breakpoint for periodic suggestions.
+- Set `autoSuggestSkills: true` to restore the legacy behavior of suggesting skills on ordinary prompts.
+
+Use explicit Sage discovery when you want prior art:
+
+```text
+@sage find an existing skill or behavior for reviewing this implementation plan
+```
+
+or call the Code Mode tools directly:
+
+```text
+sage_search({domain: "skills", action: "search", params: {query: "implementation plan review"}})
+sage_search({domain: "behaviors", action: "recommend", params: {intent: "review this implementation plan"}})
+```
+
 ### Soul Stream Context (Optional)
 
-You can prepend a locally synced DAO soul stream document to each run by setting:
+You can prepend a locally synced DAO soul stream document on relevant governance turns by setting:
 
 ```json
 {
@@ -245,7 +264,13 @@ You can prepend a locally synced DAO soul stream document to each run by setting
 }
 ```
 
-This reads `~/.local/share/sage/souls/<subdao>-<libraryId>.md` when present.
+This reads `~/.local/share/sage/souls/<subdao>-<libraryId>.md` when present, but only when the prompt mentions:
+
+- the configured DAO address;
+- a non-generic configured library id; or
+- a narrow governance term such as `proposal`, `treasury`, `quorum`, `vote`, `voting`, `delegate`, `delegation`, `governance`, `dao`, `subdao`, `bounty`, or `reflection`.
+
+Ordinary coding/product prompts do not receive soul-stream context just because `soulStreamDao` is configured. If a turn needs richer Sage or governance context, ask explicitly with `@sage` or run Sage Protocol Heartbeat.
 
 ### Injection Guard (Opt-In)
 
@@ -267,7 +292,7 @@ By default this is **off**.
 Notes:
 
 - `injectionGuardMode=block` blocks `sage_execute` calls whose params are flagged.
-- `injectionGuardScanAgentPrompt` scans the agent's initial prompt at start.
+- `injectionGuardScanAgentPrompt` scans the prompt seen by `before_prompt_build`.
 - `injectionGuardUsePromptGuard` sends text to HuggingFace Prompt Guard if `SAGE_PROMPT_GUARD_API_KEY` is set; keep this off unless you explicitly want third-party scanning.
 - Scanner coverage follows Sage CLI/security rules, so updated prompt-injection patterns in Sage can increase warn/block detections when `injectionGuardEnabled=true`.
 
@@ -278,7 +303,7 @@ If you also enabled Sage's OpenClaw _internal hook_ (installed by `sage init`), 
 Direct `openclaw plugins install @sage-protocol/openclaw-sage` registers the internal hooks from
 the plugin at runtime, so bootstrap injection is active unless you disable it.
 
-- `sage init --openclaw` now defaults to plugin-first setup and only installs scan-only hooks, so duplicate injection should not happen by default.
+- `sage init --openclaw` installs a bridge-only embedded plugin template and scan-only hooks, so duplicate package-plugin context injection should not happen by default.
 - Only `sage init --openclaw --mode hooks` installs the legacy `agent:bootstrap` injection hook.
 - If you deliberately re-enable bootstrap injection alongside the plugin, disable it with `SAGE_OPENCLAW_INJECT_CONTEXT=0`.
 
@@ -287,6 +312,69 @@ The internal hook now also scans `command:new` and `command:stop` through `sage 
 You can disable internal-hook scanning independently with `SAGE_OPENCLAW_SECURITY_SCAN=0`.
 
 The plugin remains the preferred place for per-run injection and suggestions.
+
+### Capture Hooks Are Emit-Only
+
+RLM/capture hooks record prompt, response, and session signals for later review. They do not feed daemon learnings or captured content back into future prompt context automatically.
+
+Richer Sage context appears only through:
+
+- the compact always-on Sage affordance;
+- explicit Sage requests such as `@sage`, `sage_search`, or `sage_execute`;
+- Sage Protocol Heartbeat; or
+- explicit `autoSuggestSkills: true` legacy configuration.
+
+Future prompt-building hooks should preserve this invariant: capture may emit signals, but it must not silently add learned context to unrelated turns.
+
+## Optional Sage Capability Brief
+
+OpenClaw does not run a capability brief automatically. Use it at an explicit breakpoint — for example during Sage Protocol Heartbeat, after a repeated workflow, or when you ask for one.
+
+Use this prompt:
+
+```text
+@sage Run a Sage Capability Brief for this repo/session.
+
+Goal: help me discover useful Sage capabilities, avoid duplicate skill creation, and capture reusable workflows without interrupting active work.
+
+Safety constraints:
+- Read/search/inspect only unless I explicitly approve a follow-up action.
+- Do not push to IPFS.
+- Do not publish, promote, tip, vote, join rooms, create bounties, claim rewards, or spend credits.
+- Do not edit existing skills.
+- If no genuinely useful signal is found, return exactly: [SILENT]
+
+Procedure:
+1. Inspect local Sage posture with read-only commands or tools.
+2. Identify 1-3 repeated workflows, friction points, stale capability surfaces, or missed reuse opportunities.
+3. Search prior art before proposing anything new: skills, prompts, behaviors, and libraries.
+4. Deduplicate by capability, not by mention.
+5. Prefer using or improving existing prior art over drafting net-new.
+6. Return a concise brief where every item has a claim, why it matters, evidence, confidence, and action.
+```
+
+Output should use operator-grade items:
+
+```markdown
+### [High|Medium] <claim title>
+**Claim:** <one sentence>
+**Why it matters:** <operator value>
+**Evidence:** <commands/results or local observations>
+**Confidence:** High / Medium / Low / Unverified
+**Action:** preview A1 / use A1 / draft D1 locally only / snooze A1 7d
+```
+
+Agreement gates:
+
+- `preview A1` = inspect/read-only command only.
+- `use A1` = activate/use an existing local capability when safe.
+- `draft D1` = write a local-only draft only after explicit approval.
+- `add D1 to <library>` = add a reviewed local draft to a local library.
+- `push <library>` = separate explicit publish step, never implied by this brief.
+- `snooze A1 7d` = hide repeated recommendation.
+- silence = no action.
+
+The brief is modeled after the Hermes Sage Capability Brief pattern, but OpenClaw does not provide Hermes cron/profile behavior. For OpenClaw v1, this is manual or heartbeat-triggered only.
 
 ## What It Provides
 

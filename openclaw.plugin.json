@@ -29,7 +29,7 @@
     "soulStreamDao": {
       "label": "Soul Stream DAO",
       "placeholder": "0x...",
-      "help": "Optional SubDAO address for local soul stream context injection."
+      "help": "Optional SubDAO address for local soul stream context injection on governance-relevant turns."
     },
     "soulStreamLibraryId": {
       "label": "Soul Stream Library ID",
@@ -59,11 +59,11 @@
       },
       "autoInjectContext": {
         "type": "boolean",
-        "description": "Inject Sage tool context into the agent at start (default: true)"
+        "description": "Inject compact Sage capability context into the agent (default: true)"
       },
       "autoSuggestSkills": {
         "type": "boolean",
-        "description": "Suggest relevant skills at agent start (default: true)"
+        "description": "Suggest relevant skills on ordinary prompts only when explicitly true; explicit @sage/sage_search/sage_execute and heartbeat can still trigger discovery (default: false)"
       },
       "suggestLimit": {
         "type": "number",

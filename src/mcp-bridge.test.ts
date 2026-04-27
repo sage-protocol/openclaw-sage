@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 import { McpBridge } from "./mcp-bridge.js";
@@ -49,6 +50,118 @@ function addSageDebugBinToPath() {
   const sep = process.platform === "win32" ? ";" : ":";
   process.env.PATH = `${dirs.join(sep)}${sep}${process.env.PATH ?? ""}`;
   return { binDir: dirs[0] };
+}
+
+function withEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
+  const old: Record<string, string | undefined> = {};
+  for (const key of Object.keys(patch)) old[key] = process.env[key];
+  try {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function withEnvAsync<T>(
+  patch: Record<string, string | undefined>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const old: Record<string, string | undefined> = {};
+  for (const key of Object.keys(patch)) old[key] = process.env[key];
+  try {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function createFakeSageCli(): { dir: string; bin: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "openclaw-sage-fake-"));
+  const bin = join(dir, "sage");
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const cmd = args.join(' ');
+if (cmd === 'wallet current') {
+  console.log('Address: 0x9794415D000000000000000000000000000007CA');
+  console.log('Type: privy');
+  console.log('Chain ID: 84532');
+  process.exit(0);
+}
+if (cmd === 'library active') {
+  console.log('1. test-lib');
+  process.exit(0);
+}
+if (cmd === 'library list') {
+  console.log('test-lib (2 prompts, 3 skills)');
+  process.exit(0);
+}
+if (cmd === 'capture hook prompt' || cmd === 'capture hook response') process.exit(0);
+process.exit(0);
+`,
+  );
+  chmodSync(bin, 0o755);
+  return { dir, bin, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function registerPromptBuildHook(pluginConfig: Record<string, unknown> = {}) {
+  const hooks: Record<string, any> = {};
+  const api = {
+    id: "t",
+    name: "t",
+    pluginConfig,
+    logger: {
+      info: (_: string) => {},
+      warn: (_: string) => {},
+      error: (_: string) => {},
+    },
+    registerTool: (_tool: any) => {},
+    registerService: (_svc: any) => {},
+    on: (hook: string, handler: any) => {
+      hooks[hook] = handler;
+    },
+    registerHook: (_hook: string, _handler: any) => {},
+  };
+  plugin.register(api as any);
+  assert.ok(typeof hooks.before_prompt_build === "function", "expected before_prompt_build hook");
+  return hooks.before_prompt_build;
+}
+
+async function measurePrompt(hook: any, prompt: string) {
+  const result = (await hook({ prompt })) ?? {};
+  const stable = result.prependSystemContext ?? "";
+  const dynamic = result.prependContext ?? "";
+  const stableBytes = Buffer.byteLength(stable, "utf8");
+  const dynamicBytes = Buffer.byteLength(dynamic, "utf8");
+  return {
+    stable,
+    dynamic,
+    stableBytes,
+    dynamicBytes,
+    totalBytes: stableBytes + dynamicBytes,
+    hasSuggestedSkills: /## Suggested Skills/.test(`${stable}\n${dynamic}`),
+  };
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 // ── P0: Version consistency ──────────────────────────────────────────
@@ -190,16 +303,101 @@ test("enrichErrorMessage passes through unknown errors", () => {
 
 // ── P2: SAGE_CONTEXT completeness ────────────────────────────────────
 
-test("SAGE_CONTEXT includes all major tool categories and stays thin", () => {
+test("SAGE_CONTEXT includes discovery affordance and stays thin", () => {
   const ctx = __test.SAGE_CONTEXT;
   assert.ok(ctx.includes("Sage (Code Mode)"), "should include Code Mode header");
+  assert.ok(ctx.includes("capability layer"), "should use capability-first framing");
   assert.ok(ctx.includes("sage_search"), "should mention sage_search");
   assert.ok(ctx.includes("sage_execute"), "should mention sage_execute");
   assert.ok(ctx.includes("sage_status"), "should mention sage_status");
-  assert.ok(ctx.includes("Context hygiene"), "should include context hygiene guidance");
-  assert.ok(ctx.includes("This bootstrap is enough for simple Sage search, inspection, activation, and status checks"), "should describe bootstrap scope without making OpenClaw routing-only");
+  assert.ok(ctx.includes("@sage"), "should describe explicit richer-discovery trigger");
+  assert.ok(ctx.includes("Ordinary prompts should stay quiet"), "should encode quiet-by-default posture");
+  assert.ok(Buffer.byteLength(ctx, "utf8") < 1400, "stable card should remain compact");
   assert.ok(!ctx.includes("Wallet and auth troubleshooting"), "stable context should not preload auth manual");
   assert.ok(!ctx.includes("Collaboration Posture"), "stable context should not preload collaboration manual");
+  assert.ok(!ctx.includes("Distribution ladder"), "stable context should not preload distribution manual");
+});
+
+test("explicit Sage trigger detection is narrow", () => {
+  assert.equal(__test.isExplicitSagePrompt("@sage find a context hygiene skill"), true);
+  assert.equal(__test.isExplicitSagePrompt("please use sage_search for prior art"), true);
+  assert.equal(__test.isExplicitSagePrompt("use sage_execute only after approval"), true);
+  assert.equal(__test.isExplicitSagePrompt("sagebrush grows here"), false);
+  assert.equal(__test.isExplicitSagePrompt("ordinary usage question"), false);
+});
+
+test("soulStreamApplies gates on DAO, non-generic library id, and narrow governance terms", () => {
+  assert.equal(__test.soulStreamApplies("Review DAO 0xAbC123 proposal", "0xabc123", "soul"), true);
+  assert.equal(__test.soulStreamApplies("Review DAO 0xAbC1234 proposal", "0xabc123", "soul"), true, "governance term still matches even when address token is longer");
+  assert.equal(__test.soulStreamApplies("ordinary reference to 0xAbC1234", "0xabc123", "soul"), false, "DAO address should not match as a substring of a longer hex token");
+  assert.equal(__test.soulStreamApplies("ordinary token foo0xAbC123", "0xabc123", "soul"), false, "DAO address should require a narrow token boundary before the address");
+  assert.equal(__test.soulStreamApplies("Use soul-alpha context", "", "soul-alpha"), true);
+  assert.equal(__test.soulStreamApplies("This is a soulful parser refactor", "", "soul"), false);
+  for (const term of ["proposal", "treasury", "quorum", "vote", "voting", "delegate", "delegation", "governance", "dao", "subdao", "bounty", "reflection"]) {
+    assert.equal(__test.soulStreamApplies(`Need ${term} context`, "", "soul"), true, term);
+  }
+  for (const term of ["library", "claim", "tip", "voted", "devoted"]) {
+    assert.equal(__test.soulStreamApplies(`ordinary ${term} work`, "", "soul"), false, term);
+  }
+});
+
+test("before_prompt_build measures normal prompts and omits unsolicited suggestions by default", async () => {
+  const fake = createFakeSageCli();
+  try {
+    const hook = withEnv({ SAGE_CAPTURE_HOOKS: "0" }, () =>
+      registerPromptBuildHook({ sageBinary: fake.bin }),
+    );
+    const fixtures = [
+      "refactor this TypeScript parser and update tests",
+      "fix",
+      "@sage find a skill for context hygiene review",
+      "Use sage_search to inspect relevant skills before editing",
+      "Sage Protocol Heartbeat: review context and suggest capabilities",
+    ];
+    const measurements = [];
+    for (const prompt of fixtures) measurements.push(await measurePrompt(hook, prompt));
+
+    for (const m of measurements) {
+      assert.equal(m.totalBytes, m.stableBytes + m.dynamicBytes);
+    }
+
+    const normal = measurements[0];
+    assert.equal(normal.hasSuggestedSkills, false, "normal prompt should not get suggestions");
+    assert.ok(normal.stable.includes("Sage (Code Mode)"), "normal prompt keeps compact affordance");
+    assert.ok(!normal.stable.includes("### Key Commands"), "identity block should not include command list");
+    assert.ok(!normal.stable.includes("Distribution ladder"), "identity block should not duplicate protocol manual");
+
+    // Baseline note: before this refactor ordinary prompts received the same stable card plus
+    // duplicated protocol/key-command identity text and could receive a dynamic skill block.
+    const normalMedian = median([measurements[0].totalBytes, measurements[1].totalBytes]);
+    assert.ok(Number.isFinite(normalMedian));
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test("soul stream context is injected only for governance-relevant prompts", async () => {
+  const fake = createFakeSageCli();
+  const xdg = mkdtempSync(join(tmpdir(), "openclaw-sage-xdg-"));
+  try {
+    const dao = "0xabc123";
+    const soulDir = join(xdg, "sage", "souls");
+    mkdirSync(soulDir, { recursive: true });
+    writeFileSync(join(soulDir, `${dao}-soul.md`), "SOUL_SENTINEL: treasury context");
+
+    await withEnvAsync({ XDG_DATA_HOME: xdg, SAGE_CAPTURE_HOOKS: "0" }, async () => {
+      const hook = registerPromptBuildHook({ sageBinary: fake.bin, soulStreamDao: dao });
+
+      const ordinary = await measurePrompt(hook, "refactor this TypeScript parser");
+      assert.ok(!ordinary.stable.includes("SOUL_SENTINEL"));
+
+      const governance = await measurePrompt(hook, "Review this proposal for the DAO treasury");
+      assert.ok(governance.stable.includes("SOUL_SENTINEL"));
+    });
+  } finally {
+    fake.cleanup();
+    rmSync(xdg, { recursive: true, force: true });
+  }
 });
 
 // ── Existing tests (integration — require sage binary) ───────────────

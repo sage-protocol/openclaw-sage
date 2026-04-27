@@ -106,10 +106,10 @@ test("OpenClaw plugin registers internal runtime hooks", () => {
 });
 
 test("OpenClaw runtime hook injects bootstrap context (hermetic)", async () => {
-  const hooks = registerRuntimeHooks();
-  const handler = hooks["agent:bootstrap"];
   const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-hook-test-"));
   const { binDir } = createFakeSageBinary(tmp);
+  const hooks = registerRuntimeHooks({ sageBinary: resolve(tmp, "sage") });
+  const handler = hooks["agent:bootstrap"];
   const pathSep = process.platform === "win32" ? ";" : ":";
 
   await withPatchedEnv(
@@ -139,10 +139,10 @@ test("OpenClaw runtime hook injects bootstrap context (hermetic)", async () => {
 });
 
 test("OpenClaw runtime hook scans command:new and prepends warning (hermetic)", async () => {
-  const hooks = registerRuntimeHooks();
-  const handler = hooks["command:new"];
   const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-hook-test-"));
   const { binDir } = createFakeSageBinary(tmp);
+  const hooks = registerRuntimeHooks({ sageBinary: resolve(tmp, "sage") });
+  const handler = hooks["command:new"];
   const pathSep = process.platform === "win32" ? ";" : ":";
 
   await withPatchedEnv(
@@ -164,10 +164,10 @@ test("OpenClaw runtime hook scans command:new and prepends warning (hermetic)", 
 });
 
 test("OpenClaw runtime hook scans command:stop and prepends warning (hermetic)", async () => {
-  const hooks = registerRuntimeHooks();
-  const handler = hooks["command:stop"];
   const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-hook-test-"));
   const { binDir } = createFakeSageBinary(tmp);
+  const hooks = registerRuntimeHooks({ sageBinary: resolve(tmp, "sage") });
+  const handler = hooks["command:stop"];
   const pathSep = process.platform === "win32" ? ";" : ":";
 
   await withPatchedEnv(
@@ -189,10 +189,10 @@ test("OpenClaw runtime hook scans command:stop and prepends warning (hermetic)",
 });
 
 test("OpenClaw runtime hook respects SAGE_OPENCLAW_SECURITY_SCAN=0 (hermetic)", async () => {
-  const hooks = registerRuntimeHooks();
-  const handler = hooks["command:new"];
   const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-hook-test-"));
   const { binDir } = createFakeSageBinary(tmp);
+  const hooks = registerRuntimeHooks({ sageBinary: resolve(tmp, "sage") });
+  const handler = hooks["command:new"];
   const pathSep = process.platform === "win32" ? ";" : ":";
 
   await withPatchedEnv(
