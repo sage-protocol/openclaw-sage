@@ -443,7 +443,17 @@ test("McpBridge can initialize, list tools, and call a native tool", async (t) =
   }
 });
 
-test("OpenClaw plugin registers MCP tools via sage mcp start", async () => {
+test("OpenClaw plugin registers MCP tools via sage mcp start", async (t) => {
+  const sageBin = resolveSageBinaryForTests();
+  if (!canExecuteSage(sageBin)) {
+    t.skip(`sage binary not available for integration test: ${sageBin}`);
+    return;
+  }
+  if (!isRepoDebugSage(sageBin)) {
+    t.skip(`expected repo debug sage binary; got: ${sageBin}`);
+    return;
+  }
+
   addSageDebugBinToPath();
 
   const registeredTools: string[] = [];

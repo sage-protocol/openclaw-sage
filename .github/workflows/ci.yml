@@ -27,10 +27,6 @@ jobs:
 
       - name: Run unit tests (no sage binary required)
         run: node --import tsx src/mcp-bridge.test.ts
-        env:
-          # Unit tests that don't need the sage binary will pass;
-          # integration tests that need it will be skipped on CI
-          NODE_OPTIONS: "--test-only"
 
   latest-openclaw-install-check:
     runs-on: ubuntu-latest
@@ -95,7 +91,7 @@ jobs:
           OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
         run: |
           npx --yes openclaw@latest hooks list --json > hooks-list.json
-          node -e 'const fs=require("node:fs"); const hooks=JSON.parse(fs.readFileSync("hooks-list.json","utf8")).hooks || []; const pluginHooks=hooks.filter((hook)=>hook.pluginId === "openclaw-sage" && hook.managedByPlugin === true); const names=pluginHooks.map((hook)=>hook.name).sort(); const expectedNames=["sage-bootstrap-context","sage-command-new-scan","sage-command-stop-scan"].sort(); if (JSON.stringify(names)!==JSON.stringify(expectedNames)) throw new Error(`unexpected plugin-managed hook names: ${JSON.stringify(names)}`); const events=pluginHooks.map((hook)=>hook.event).sort(); const expectedEvents=["agent:bootstrap","command:new","command:stop"].sort(); if (JSON.stringify(events)!==JSON.stringify(expectedEvents)) throw new Error(`unexpected plugin-managed hook events: ${JSON.stringify(events)}`);'
+          node -e 'const fs=require("node:fs"); const hooks=JSON.parse(fs.readFileSync("hooks-list.json","utf8")).hooks || []; const pluginHooks=hooks.filter((hook)=>hook.pluginId === "openclaw-sage" && hook.managedByPlugin === true); const names=pluginHooks.map((hook)=>hook.name).sort(); const expectedNames=["sage-bootstrap-context","sage-command-new-scan","sage-command-stop-scan"].sort(); if (JSON.stringify(names)!==JSON.stringify(expectedNames)) throw new Error(`unexpected plugin-managed hook names: ${JSON.stringify(names)}`); const events=pluginHooks.flatMap((hook)=>Array.isArray(hook.events) ? hook.events : [hook.event]).filter(Boolean).sort(); const expectedEvents=["agent:bootstrap","command:new","command:stop"].sort(); if (JSON.stringify(events)!==JSON.stringify(expectedEvents)) throw new Error(`unexpected plugin-managed hook events: ${JSON.stringify(events)}`);'
 
       - name: Capture plugin doctor output
         if: env.OPENCLAW_HOST_CRASH != '1'
