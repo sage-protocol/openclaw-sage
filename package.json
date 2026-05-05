@@ -1,6 +1,6 @@
 {
   "name": "@sage-protocol/openclaw-sage",
-  "version": "0.2.0",
+  "version": "0.1.12",
   "description": "OpenClaw Code Mode bridge for Sage prompts, skills, libraries, MCP tools, and value-network workflows",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
