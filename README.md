@@ -124,20 +124,56 @@ sage doctor --include-details
 sage agent quickstart --check
 ```
 
-If OpenClaw fails to inspect plugins because a bundled OpenClaw runtime dependency
-is missing, check `plugin-install.txt` and `plugin-doctor.txt` for the current
-host-side failure. The plugin can still install to the correct path while the
-host runtime is broken.
+If OpenClaw fails to inspect plugins, run `openclaw plugins list`,
+`openclaw plugins info openclaw-sage`, and `sage doctor --include-details` in
+the same shell. If the package is installed but inspection still fails, restart
+the OpenClaw gateway and verify the host OpenClaw runtime can load plugins.
 
-## Learn More
+## Sage CLI Quick Reference
+
+Use these commands from the same shell that launches OpenClaw:
+
+| Goal | Command |
+| --- | --- |
+| Runtime health | `sage doctor --include-details` |
+| OpenClaw setup | `sage init --openclaw --mode plugin --yes` |
+| Onboarding status | `sage agent quickstart --check` |
+| Start MCP bridge manually | `sage mcp start` |
+| Search skills | `sage search "<query>" --search-type skills --scope both --limit 20` |
+| Search libraries | `sage search "<query>" --search-type libraries --scope remote --limit 20` |
+| Capture status | `sage capture status` |
+| Learned patterns | `sage metrics list-patterns --limit 20` |
+| Create local library | `sage library create "my-workflow"` |
+| Use local library | `sage library use "my-workflow"` |
+| Push private cloud library | `sage library push "my-workflow" --cloud` |
+| Discover DAOs | `sage governance dao discover --limit 50` |
+
+Run `sage <command> --help` before editing docs or automating a flow. Sage CLI
+surfaces can move, and the plugin should document the command that actually
+exists on the installed binary.
+
+## Distribution Surfaces
+
+Sage has several sharing surfaces. Pick the smallest one that matches the
+operator's intent:
+
+- Local install/expose makes a prompt, skill, or library usable on this machine.
+- P2P and shared libraries sync with trusted collaborators without public discovery.
+- Personal cloud hosts a creator-controlled library and stays private by default.
+- Marketplace publishing is for polished public artifacts the author wants to sell or distribute broadly.
+- DAO promotion is for long-term public canon with governance provenance.
+- Tips, bounties, reflections, and rewards are value-network actions; use them only after explicit user intent.
+
+Never treat install, sync, save, or use as permission to publish, sell, vote,
+tip, claim, or promote.
+
+## Package Docs
 
 - [AGENTS.md](AGENTS.md) - operational runbooks and current command recipes
 - [SOUL.md](SOUL.md) - compact OpenClaw agent posture
-- [CONTRIBUTING-SKILL-FILES.md](CONTRIBUTING-SKILL-FILES.md) - rules for editing runtime agent files
-- [Sage IDE Integration](../sage/docs/ide-integration.md)
-- [Sage CLI Reference](../sage/docs/cli-reference.md)
-- [Sage Vault / Harness Context](../sage/docs/SAGE_VAULT.md)
-- [Sage Distribution Surfaces](../sage/skills/sage/references/distribution-surface.md)
+
+This README is self-contained for package consumers. It does not require access
+to the Sage monorepo docs.
 
 ## Requirements
 

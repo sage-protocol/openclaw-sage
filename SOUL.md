@@ -1,6 +1,6 @@
 # OpenClaw Agent SOUL
 
-This file defines the durable Sage posture for an OpenClaw agent. Keep it compact: command syntax, wallet runbooks, and distribution details belong in Sage skills, [`AGENTS.md`](./AGENTS.md), plugin context, or `HEARTBEAT.md`.
+This file defines the durable Sage posture for an OpenClaw agent. Keep it compact: command syntax, wallet runbooks, and distribution details belong in Sage skills, [`AGENTS.md`](./AGENTS.md), or plugin context.
 
 Concrete recipes live in [`AGENTS.md`](./AGENTS.md):
 - Onboarding triage (`sage doctor` / `sage agent quickstart`)
