@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.12](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.11...openclaw-sage-v0.1.12) (2026-05-05)
+
+
+### Features
+
+* **context:** promote Sage loop + pre-write reflexes into always-on SAGE_CONTEXT ([d648d53](https://github.com/sage-protocol/openclaw-sage/commit/d648d537ac57478ca8457342b144fe07841c6e54))
+* **openclaw:** refresh plugin context ([306b740](https://github.com/sage-protocol/openclaw-sage/commit/306b7402dc109a7c15926c7cb224701f35f33689))
+* version bump ([b22c977](https://github.com/sage-protocol/openclaw-sage/commit/b22c9778df4b088f7ecb9effdbd5f7705407a3f2))
+
+
+### Bug Fixes
+
+* **ci:** fixing ci errors ([5f28e54](https://github.com/sage-protocol/openclaw-sage/commit/5f28e54cb5cb7eb8fa3535f2e5e5ed968ecbf3f3))
+
 ## [Unreleased]
 
 ### Changed
