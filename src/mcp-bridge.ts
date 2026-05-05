@@ -70,10 +70,12 @@ export class McpBridge extends EventEmitter {
     this.stopped = true;
     this.ready = false;
     this.rejectAll("Bridge stopped");
-    if (this.proc) {
-      this.proc.kill("SIGTERM");
-      this.proc = null;
-    }
+
+    const proc = this.proc;
+    this.proc = null;
+    if (!proc) return;
+
+    await this.terminateProcess(proc);
   }
 
   async listTools(): Promise<McpToolDef[]> {
@@ -166,6 +168,47 @@ export class McpBridge extends EventEmitter {
     if (!this.proc?.stdin?.isWritable()) return;
     const msg = { jsonrpc: "2.0", method, params };
     this.proc.stdin.write(JSON.stringify(msg) + "\n");
+  }
+
+  private terminateProcess(proc: SpawnedProcess): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
+      let resolveTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (sigkillTimer) clearTimeout(sigkillTimer);
+        if (resolveTimer) clearTimeout(resolveTimer);
+        resolve();
+      };
+
+      proc.onExit(() => finish());
+      proc.onError(() => finish());
+
+      try {
+        proc.stdin?.end();
+      } catch {
+        // Already closed.
+      }
+
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        finish();
+        return;
+      }
+
+      sigkillTimer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Already exited.
+        }
+      }, 500);
+      resolveTimer = setTimeout(() => finish(), 2_000);
+    });
   }
 
   private handleLine(line: string): void {
