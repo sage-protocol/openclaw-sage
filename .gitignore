@@ -2,7 +2,9 @@ node_modules/
 dist/
 .tmp-openclaw-home/
 .tmp-openclaw-home-ci/
+.tmp-openclaw-home-local-ci/
 pack.json
+hooks-list.json
 plugin-doctor.txt
 plugin-inspect.json
 plugin-install.txt
