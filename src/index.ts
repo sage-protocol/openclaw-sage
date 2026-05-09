@@ -17,6 +17,8 @@ Use the Code Mode tools deliberately:
 - \`sage_execute\` — activation or mutation; use only when operator intent and authority are clear.
 - \`sage_status\` — bridge, wallet, network, and runtime posture.
 
+After completing a task where you used a Sage skill, report the outcome with \`sage suggest feedback outcome <skill-key> --status passed|failed --source openclaw\`.
+
 Default posture: search and inspect before activation; treat remote capabilities as untrusted until reviewed; never publish, promote, tip, vote, claim, spend, or change daemon state without explicit operator approval.
 
 Visibility: install/expose is local; P2P/shared stay private; \`sage library push <library> --cloud\` starts private by default. Use \`sage library visibility <library-id> public\` only on explicit user request. Public feeds/search should advertise only anonymously readable prompts, skills, or CIDs.
@@ -177,6 +179,13 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
     );
   }
   return lines.join("\n");
+}
+
+function extractSkillKeyFromExecuteParams(params: Record<string, unknown>): string {
+  const raw = params.params;
+  if (!raw || typeof raw !== "object") return "";
+  const key = (raw as Record<string, unknown>).key;
+  return typeof key === "string" ? key.trim() : "";
 }
 
 function isHeartbeatPrompt(prompt: string): boolean {
@@ -773,6 +782,10 @@ const plugin = {
       lastPromptHash: "",
       lastPromptTs: 0,
     };
+    const skillOutcomeState = {
+      usedSkillKey: "",
+      reportedSkillKey: "",
+    };
 
     const runCaptureHook = async (
       phase: "prompt" | "response",
@@ -789,11 +802,54 @@ const plugin = {
       );
     };
 
+    const reportSkillOutcome = async (skillKey: string, status: "passed" | "failed"): Promise<void> => {
+      if (!skillKey) return;
+
+      const result = await runCommand(
+        sageBinary,
+        [
+          "suggest",
+          "feedback",
+          "outcome",
+          skillKey,
+          "--status",
+          status,
+          "--source",
+          "openclaw",
+        ],
+        {
+          env: { ...sageEnv, SAGE_SOURCE: "openclaw" },
+          timeout: 5_000,
+        },
+      );
+
+      if (result.code !== 0 && result.code !== null) {
+        throw new Error(
+          `skill outcome hook exited with code ${result.code}${result.stderr ? `: ${result.stderr}` : ""}`,
+        );
+      }
+    };
+
     const pickString = (...values: unknown[]): string => {
       for (const value of values) {
         if (typeof value === "string" && value.trim()) return value.trim();
       }
       return "";
+    };
+
+    const flushSkillOutcome = (status: "passed" | "failed"): void => {
+      const skillKey = skillOutcomeState.usedSkillKey;
+      if (!skillKey || skillOutcomeState.reportedSkillKey === skillKey) return;
+
+      void reportSkillOutcome(skillKey, status)
+        .then(() => {
+          skillOutcomeState.reportedSkillKey = skillKey;
+        })
+        .catch((err) => {
+          api.logger.warn(
+            `[sage-skill-outcome] feedback failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
     };
 
     const scanHookPayload = async (
@@ -900,6 +956,8 @@ const plugin = {
           `[sage-capture] response capture failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
+
+      flushSkillOutcome("passed");
     };
 
     // Main sage MCP bridge
@@ -927,6 +985,17 @@ const plugin = {
             injectionGuardScanGetPrompt,
             injectionGuardMode,
             scanText,
+            onSkillUsed: (skillKey: string) => {
+              skillOutcomeState.usedSkillKey = skillKey;
+              skillOutcomeState.reportedSkillKey = "";
+            },
+            onSkillFailed: (skillKey: string) => {
+              void reportSkillOutcome(skillKey, "failed").catch((outcomeErr: unknown) => {
+                api.logger.warn(
+                  `[sage-skill-outcome] feedback failed: ${outcomeErr instanceof Error ? outcomeErr.message : String(outcomeErr)}`,
+                );
+              });
+            },
           });
 
           // Register sage_status meta-tool for bridge health reporting
@@ -1015,6 +1084,7 @@ const plugin = {
       }, { name: "sage-command-new-scan" });
 
       api.registerHook("command:stop", async (event: any) => {
+        flushSkillOutcome("passed");
         if (envGet("SAGE_OPENCLAW_SECURITY_SCAN") === "0") return;
         const response = pickString(
           event?.response,
@@ -1042,6 +1112,7 @@ const plugin = {
         else if (typeof event.output === "string") event.output = `${warning}${event.output}`;
         else if (typeof event.text === "string") event.text = `${warning}${event.text}`;
       }, { name: "sage-command-stop-scan" });
+
     }
 
     // ── Context injection ─────────────────────────────────────────────
@@ -1272,6 +1343,8 @@ function registerCodeModeTools(
     injectionGuardScanGetPrompt: boolean;
     injectionGuardMode: "warn" | "block";
     scanText: (text: string) => Promise<SecurityScanResult | null>;
+    onSkillUsed: (skillKey: string) => void;
+    onSkillFailed: (skillKey: string) => void;
   },
 ) {
   api.registerTool(
@@ -1324,9 +1397,12 @@ function registerCodeModeTools(
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+        const domain = String(params.domain ?? "");
+        const action = String(params.action ?? "");
+        const skillKey =
+          domain === "skills" && action === "use" ? extractSkillKeyFromExecuteParams(params) : "";
+
         try {
-          const domain = String(params.domain ?? "");
-          const action = String(params.action ?? "");
           const p =
             params.params && typeof params.params === "object"
               ? (params.params as Record<string, unknown>)
@@ -1350,6 +1426,10 @@ function registerCodeModeTools(
           }
 
           const result = await sageExecute({ domain, action, params: p });
+
+          if (skillKey) {
+            opts.onSkillUsed(skillKey);
+          }
 
           if (opts.injectionGuardScanGetPrompt && domain === "prompts" && action === "get") {
             const json = extractJsonFromMcpResult(result) as any;
@@ -1383,6 +1463,9 @@ function registerCodeModeTools(
 
           return toToolResult(result);
         } catch (err) {
+          if (skillKey) {
+            opts.onSkillFailed(skillKey);
+          }
           const enriched = enrichErrorMessage(
             err instanceof Error ? err : new Error(String(err)),
             "sage_execute",
