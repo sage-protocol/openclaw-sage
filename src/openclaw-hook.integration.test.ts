@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-import plugin from "./index.js";
+import plugin, { __test } from "./index.js";
 
 function createFakeSageBinary(dir: string): { binDir: string } {
   const scriptPath = resolve(dir, "sage");
@@ -89,7 +89,9 @@ function registerRuntimeHooks(pluginConfig?: Record<string, unknown>) {
     },
     registerTool: (_tool: any) => {},
     registerService: (_svc: any) => {},
-    on: (_hook: string, _handler: any) => {},
+    on: (hook: string, handler: any) => {
+      runtimeHooks[hook] = handler;
+    },
     registerHook: (hook: string, handler: any) => {
       runtimeHooks[hook] = handler;
     },
@@ -98,11 +100,80 @@ function registerRuntimeHooks(pluginConfig?: Record<string, unknown>) {
   return runtimeHooks;
 }
 
-test("OpenClaw plugin registers internal runtime hooks", () => {
+test("OpenClaw plugin registers internal and typed runtime hooks", () => {
   const hooks = registerRuntimeHooks();
   assert.ok(typeof hooks["agent:bootstrap"] === "function");
   assert.ok(typeof hooks["command:new"] === "function");
   assert.ok(typeof hooks["command:stop"] === "function");
+  assert.ok(typeof hooks["before_prompt_build"] === "function");
+  assert.ok(typeof hooks["agent_end"] === "function");
+  assert.ok(typeof hooks["session_end"] === "function");
+});
+
+test("OpenClaw typed hooks resolve authoritative session id from ctx", () => {
+  assert.equal(
+    __test.resolveOpenClawSessionId(
+      { sessionId: "event-session" },
+      { sessionKey: "ctx-key", sessionId: "ctx-session" },
+      { allowEventFallback: false },
+    ),
+    "ctx-key",
+  );
+  assert.equal(
+    __test.resolveOpenClawSessionId(
+      { sessionId: "event-session" },
+      { sessionId: "ctx-session" },
+      { allowEventFallback: false },
+    ),
+    "ctx-session",
+  );
+  assert.equal(
+    __test.resolveOpenClawSessionId(
+      { sessionId: "event-session" },
+      null,
+      { allowEventFallback: false },
+    ),
+    "",
+  );
+  assert.equal(
+    __test.resolveOpenClawSessionId({ sessionKey: "internal-session" }, null, { internal: true }),
+    "internal-session",
+  );
+});
+
+test("OpenClaw tool path extraction normalizes aliases and edit variants", () => {
+  assert.deepEqual(__test.extractPathsForTool("Read", { path: "/a/SKILL.md" }), ["/a/SKILL.md"]);
+  assert.deepEqual(
+    __test.extractPathsForTool("apply-patch", { files: [{ path: "/a/SKILL.md" }] }),
+    ["/a/SKILL.md"],
+  );
+  assert.deepEqual(
+    __test.extractPathsForTool("MultiEdit", {
+      edits: [{ file_path: "/a/SKILL.md" }, { path: "/b/SKILL.md" }],
+    }),
+    ["/a/SKILL.md", "/b/SKILL.md"],
+  );
+});
+
+test("OpenClaw self-edit suppression removes only matching recent realpath", () => {
+  const usedSkills = new Map([
+    [
+      "recent",
+      { readAtCallIndex: 10, realpath: "/real/SKILL.md", correlationSession: "s__turn_1" },
+    ],
+    ["old", { readAtCallIndex: 1, realpath: "/real/SKILL.md", correlationSession: "s__turn_1" }],
+    [
+      "other",
+      { readAtCallIndex: 10, realpath: "/other/SKILL.md", correlationSession: "s__turn_1" },
+    ],
+  ]);
+
+  const removed = __test.suppressSelfEditByRealpath(usedSkills, "/real/SKILL.md", 12, 5);
+
+  assert.deepEqual(removed, ["recent"]);
+  assert.equal(usedSkills.has("recent"), false);
+  assert.equal(usedSkills.has("old"), true);
+  assert.equal(usedSkills.has("other"), true);
 });
 
 test("OpenClaw runtime hook injects bootstrap context (hermetic)", async () => {

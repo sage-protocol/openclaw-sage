@@ -375,7 +375,97 @@ function extractEventResponse(event: any): string {
 }
 
 function extractEventSessionId(event: any): string {
-  return pickFirstString(event?.sessionId, event?.sessionID, event?.conversationId);
+  return pickFirstString(
+    event?.sessionKey,
+    event?.sessionId,
+    event?.sessionID,
+    event?.conversationId,
+  );
+}
+
+type OpenClawHookContext = {
+  sessionKey?: unknown;
+  sessionId?: unknown;
+};
+
+function resolveOpenClawSessionId(
+  event: any,
+  ctx?: OpenClawHookContext | null,
+  opts?: { internal?: boolean; allowEventFallback?: boolean },
+): string {
+  if (opts?.internal) return extractEventSessionId(event);
+
+  const fromCtx = pickFirstString(ctx?.sessionKey, ctx?.sessionId);
+  if (fromCtx) return fromCtx;
+
+  return opts?.allowEventFallback === false ? "" : extractEventSessionId(event);
+}
+
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  "apply-patch": "apply_patch",
+};
+
+function normalizeOpenClawToolName(toolName: unknown): string {
+  if (typeof toolName !== "string") return "";
+  const normalized = toolName.trim().toLowerCase();
+  return TOOL_NAME_ALIASES[normalized] ?? normalized;
+}
+
+function extractPathsForTool(toolName: unknown, params: unknown): string[] {
+  const normalized = normalizeOpenClawToolName(toolName);
+  const record = params && typeof params === "object" ? (params as Record<string, unknown>) : {};
+  const pickPath = (value: unknown): string[] =>
+    typeof value === "string" && value.trim() ? [value.trim()] : [];
+
+  if (["read", "edit", "write"].includes(normalized)) {
+    return pickPath(record.path).concat(pickPath(record.filePath), pickPath(record.file_path));
+  }
+
+  if (normalized === "multiedit" || normalized === "multi-edit") {
+    const edits = Array.isArray(record.edits) ? record.edits : [];
+    return edits.flatMap((edit) => {
+      const editRecord = edit && typeof edit === "object" ? (edit as Record<string, unknown>) : {};
+      return pickPath(editRecord.path).concat(
+        pickPath(editRecord.filePath),
+        pickPath(editRecord.file_path),
+      );
+    });
+  }
+
+  if (normalized === "apply_patch") {
+    const files = Array.isArray(record.files) ? record.files : [];
+    return files.flatMap((file) => {
+      const fileRecord = file && typeof file === "object" ? (file as Record<string, unknown>) : {};
+      return pickPath(fileRecord.path).concat(
+        pickPath(fileRecord.filePath),
+        pickPath(fileRecord.file_path),
+      );
+    });
+  }
+
+  return [];
+}
+
+type UsedSkillReadEntry = {
+  readAtCallIndex: number;
+  realpath: string;
+  correlationSession: string;
+};
+
+function suppressSelfEditByRealpath(
+  usedSkills: Map<string, UsedSkillReadEntry>,
+  editedRealpath: string,
+  toolCallIndex: number,
+  attributionWindow: number,
+): string[] {
+  const removed: string[] = [];
+  for (const [skillKey, entry] of usedSkills.entries()) {
+    if (entry.realpath !== editedRealpath) continue;
+    if (toolCallIndex - entry.readAtCallIndex > attributionWindow) continue;
+    usedSkills.delete(skillKey);
+    removed.push(skillKey);
+  }
+  return removed;
 }
 
 function extractEventModel(event: any): string {
@@ -802,23 +892,30 @@ const plugin = {
       );
     };
 
-    const reportSkillOutcome = async (skillKey: string, status: "passed" | "failed"): Promise<void> => {
+    const reportSkillOutcome = async (
+      skillKey: string,
+      status: "passed" | "failed",
+      sessionId?: string,
+    ): Promise<void> => {
       if (!skillKey) return;
+
+      const args = [
+        "suggest",
+        "feedback",
+        "outcome",
+        skillKey,
+        "--status",
+        status,
+        "--source",
+        "openclaw",
+      ];
+      if (sessionId) args.push("--session", sessionId);
 
       const result = await runCommand(
         sageBinary,
-        [
-          "suggest",
-          "feedback",
-          "outcome",
-          skillKey,
-          "--status",
-          status,
-          "--source",
-          "openclaw",
-        ],
+        args,
         {
-          env: { ...sageEnv, SAGE_SOURCE: "openclaw" },
+          env: { ...sageEnv, SAGE_SOURCE: "openclaw", SAGE_SESSION_ID: sessionId ?? "" },
           timeout: 5_000,
         },
       );
@@ -837,11 +934,11 @@ const plugin = {
       return "";
     };
 
-    const flushSkillOutcome = (status: "passed" | "failed"): void => {
+    const flushSkillOutcome = (status: "passed" | "failed", sessionId?: string): void => {
       const skillKey = skillOutcomeState.usedSkillKey;
       if (!skillKey || skillOutcomeState.reportedSkillKey === skillKey) return;
 
-      void reportSkillOutcome(skillKey, status)
+      void reportSkillOutcome(skillKey, status, sessionId)
         .then(() => {
           skillOutcomeState.reportedSkillKey = skillKey;
         })
@@ -878,13 +975,17 @@ const plugin = {
       ].join("\n");
     };
 
-    const capturePromptFromEvent = (hookName: string, event: any): void => {
+    const capturePromptFromEvent = (
+      hookName: string,
+      event: any,
+      sessionIdOverride?: string,
+    ): void => {
       if (!captureHooksEnabled) return;
 
       const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
       if (!prompt) return;
 
-      const sessionId = extractEventSessionId(event);
+      const sessionId = sessionIdOverride ?? extractEventSessionId(event);
       const model = extractEventModel(event);
       const provider = extractEventProvider(event);
 
@@ -921,13 +1022,20 @@ const plugin = {
       });
     };
 
-    const captureResponseFromEvent = (hookName: string, event: any): void => {
+    const captureResponseFromEvent = (
+      hookName: string,
+      event: any,
+      sessionIdOverride?: string,
+    ): void => {
       if (!captureHooksEnabled) return;
 
       const response = normalizePrompt(extractEventResponse(event), { maxBytes: maxPromptBytes });
       if (!response) return;
 
-      const sessionId = extractEventSessionId(event) || captureState.sessionId;
+      const sessionId =
+        sessionIdOverride !== undefined
+          ? sessionIdOverride
+          : extractEventSessionId(event) || captureState.sessionId;
       const model = extractEventModel(event) || captureState.model;
       const provider = extractEventProvider(event) || captureState.provider;
       const tokensInput = extractEventTokenCount(event, "input");
@@ -957,7 +1065,7 @@ const plugin = {
         );
       });
 
-      flushSkillOutcome("passed");
+      flushSkillOutcome("passed", sessionId);
     };
 
     // Main sage MCP bridge
@@ -1084,7 +1192,8 @@ const plugin = {
       }, { name: "sage-command-new-scan" });
 
       api.registerHook("command:stop", async (event: any) => {
-        flushSkillOutcome("passed");
+        const sessionId = resolveOpenClawSessionId(event, null, { internal: true });
+        flushSkillOutcome("passed", sessionId);
         if (envGet("SAGE_OPENCLAW_SECURITY_SCAN") === "0") return;
         const response = pickString(
           event?.response,
@@ -1228,8 +1337,9 @@ const plugin = {
 
     // Priority 90: run early so Sage's stable context is the base layer
     // that other plugins build on (higher = runs first).
-    api.on("before_prompt_build", async (event: any) => {
-      capturePromptFromEvent("before_prompt_build", event);
+    api.on("before_prompt_build", async (event: any, ctx: any) => {
+      const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
+      capturePromptFromEvent("before_prompt_build", event, sessionId);
       const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
 
       const [stableContext, dynamicContext] = await Promise.all([
@@ -1244,11 +1354,17 @@ const plugin = {
     }, { priority: 90 });
 
     // Legacy OpenClaw hook names observed in older runtime builds.
-    api.on("message_received", async (event: any) => {
-      capturePromptFromEvent("message_received", event);
+    api.on("message_received", async (event: any, ctx: any) => {
+      const sessionId = resolveOpenClawSessionId(event, ctx);
+      capturePromptFromEvent("message_received", event, sessionId);
     });
-    api.on("agent_end", async (event: any) => {
-      captureResponseFromEvent("agent_end", event);
+    api.on("agent_end", async (event: any, ctx: any) => {
+      const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
+      captureResponseFromEvent("agent_end", event, sessionId);
+    });
+    api.on("session_end", async (event: any, ctx: any) => {
+      const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
+      flushSkillOutcome("passed", sessionId);
     });
   },
 };
@@ -1486,6 +1602,10 @@ export const __test = {
   normalizePrompt,
   extractJsonFromMcpResult,
   formatSkillSuggestions,
+  resolveOpenClawSessionId,
+  normalizeOpenClawToolName,
+  extractPathsForTool,
+  suppressSelfEditByRealpath,
   isExplicitSagePrompt,
   soulStreamApplies,
   mcpSchemaToTypebox,
