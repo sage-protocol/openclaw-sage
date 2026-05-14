@@ -9,3 +9,5 @@ plugin-doctor.txt
 plugin-inspect.json
 plugin-install.txt
 *.tgz
+
+.context/

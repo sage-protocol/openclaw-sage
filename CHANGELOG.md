@@ -30,6 +30,12 @@
 * Added before-prompt-build fixtures covering normal prompts, explicit Sage prompts, heartbeat prompts, and soul-stream relevance so context-size and unsolicited-suggestion behavior are regression-tested.
 * Added README guidance for restoring legacy skill suggestion behavior with `autoSuggestSkills: true`.
 * Clarified the U0 source-of-truth split: the published package plugin carries prompt-context behavior, while the embedded `sage init` plugin template remains bridge-only.
+* Added default-off OpenClaw `SKILL.md` read detection behind `OPENCLAW_SAGE_TOOL_CALL_HOOK=1` or `toolCallHookEnabled: true`.
+* Added per-turn `sage suggest skill ... --source openclaw-hook --session <base>__turn_<N>` correlation registration, status-path realpath provenance from `global_paths[]` / `project_paths[]`, and prompt display derived from the same correlated CLI result.
+* Added terminal flushing for inferred reads: one `feedback use` process per non-empty correlation and one `feedback outcome` per used skill against the base session.
+* Added tests for spoof-path rejection, frontmatter/dirname validation, multi-skill one-shot use feedback, cross-turn crediting, self-edit suppression, terminal idempotency, and outcome status precedence.
+* Hardened the default-off inferred-read hook with bounded session/correlation state, root-session cleanup, subagent terminal suppression, snapshot-based terminal flushing, argv-safe skill-key filtering, defensive terminal-success coercion, parallel `sage skill status` resolution, and a regression test proving explicit `sage_execute` skill use still reports `--source openclaw --session <baseSession>`.
+* Documented live observability for `[sage-skill-read]`, the `SAGE_E2E_OPENCLAW=1` persistence test gate, one-shot feedback-use semantics, base-session outcomes, and the D1/D2/D3 prerequisites that still block a default-on rollout.
 
 ## [0.1.11](https://github.com/sage-protocol/openclaw-sage/compare/openclaw-sage-v0.1.10...openclaw-sage-v0.1.11) (2026-04-07)
 

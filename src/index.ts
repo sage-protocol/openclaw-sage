@@ -1,11 +1,12 @@
 import { Type, type TSchema } from "@sinclair/typebox";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { McpBridge } from "./mcp-bridge.js";
 import { envGet, loadTextFile, runCommand } from "./runtime.js";
+import { resolveSkillStatusSkillMdRealpaths } from "./skill-status-parse.js";
 import { PKG_VERSION } from "./version.js";
 
 const SAGE_CONTEXT = `## Sage (Code Mode)
@@ -154,11 +155,69 @@ type SkillSearchResult = {
   source?: string;
   library?: string;
   mcpServers?: string[];
+  type?: string;
+  entryKind?: string;
 };
+
+const SKILL_KEY_PATTERN = /^[a-z0-9-]+$/;
+const MAX_SKILL_USE_SESSIONS = 32;
+const MAX_CORRELATIONS_PER_SESSION = 32;
+
+function isValidSkillKey(key: string): boolean {
+  return SKILL_KEY_PATTERN.test(key);
+}
+
+function parseSkillSuggestionResults(raw: unknown): SkillSearchResult[] {
+  const parsed =
+    typeof raw === "string" && raw.trim()
+      ? (() => {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return undefined;
+          }
+        })()
+      : raw;
+  const results = Array.isArray((parsed as any)?.results)
+    ? ((parsed as any).results as unknown[])
+    : Array.isArray(parsed)
+      ? (parsed as unknown[])
+      : [];
+
+  const skillResults: SkillSearchResult[] = [];
+  for (const item of results) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const key = typeof record.key === "string" ? record.key.trim() : "";
+    if (!key || !isValidSkillKey(key)) continue;
+
+    const entryKind =
+      typeof record.entryKind === "string" ? record.entryKind.trim().toLowerCase() : "";
+    const type = typeof record.type === "string" ? record.type.trim().toLowerCase() : "";
+    const isSkill = entryKind ? entryKind === "skill" && (!type || type === "skill") : type === "skill";
+    if (!isSkill) continue;
+
+    const result: SkillSearchResult = {
+      key,
+      name: typeof record.name === "string" ? record.name : undefined,
+      description: typeof record.description === "string" ? record.description : undefined,
+      source: typeof record.source === "string" ? record.source : undefined,
+      library: typeof record.library === "string" ? record.library : undefined,
+      type: typeof record.type === "string" ? record.type : undefined,
+      entryKind: typeof record.entryKind === "string" ? record.entryKind : undefined,
+    };
+    if (Array.isArray(record.mcpServers)) {
+      result.mcpServers = record.mcpServers.filter((s): s is string => typeof s === "string");
+    }
+    skillResults.push(result);
+  }
+
+  return skillResults;
+}
 
 function formatSkillSuggestions(results: SkillSearchResult[], limit: number): string {
   const items = results
-    .filter((r) => r && typeof r.key === "string" && r.key.trim())
+    .filter((r) => r && typeof r.key === "string" && isValidSkillKey(r.key.trim()))
     .slice(0, limit);
   if (!items.length) return "";
 
@@ -405,10 +464,41 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   "apply-patch": "apply_patch",
 };
 
+const READ_TOOLS = new Set(["read"]);
+const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "multiedit", "multi-edit"]);
+const SKILL_READ_ATTRIBUTION_WINDOW = 5;
+
 function normalizeOpenClawToolName(toolName: unknown): string {
   if (typeof toolName !== "string") return "";
   const normalized = toolName.trim().toLowerCase();
   return TOOL_NAME_ALIASES[normalized] ?? normalized;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function extractPathsFromPatchText(patch: string): string[] {
+  const paths: string[] = [];
+  for (const line of patch.split(/\r?\n/)) {
+    const applyPatchMatch = line.match(/^\*\*\* (?:Add|Update|Delete) File:\s+(.+?)\s*$/);
+    if (applyPatchMatch?.[1]) {
+      paths.push(applyPatchMatch[1].trim());
+      continue;
+    }
+
+    const moveMatch = line.match(/^\*\*\* Move to:\s+(.+?)\s*$/);
+    if (moveMatch?.[1]) {
+      paths.push(moveMatch[1].trim());
+      continue;
+    }
+
+    const unifiedMatch = line.match(/^(?:---|\+\+\+)\s+(?:a\/|b\/)?(.+?)\s*$/);
+    if (unifiedMatch?.[1] && unifiedMatch[1] !== "/dev/null") {
+      paths.push(unifiedMatch[1].trim());
+    }
+  }
+  return uniqueStrings(paths);
 }
 
 function extractPathsForTool(toolName: unknown, params: unknown): string[] {
@@ -434,13 +524,15 @@ function extractPathsForTool(toolName: unknown, params: unknown): string[] {
 
   if (normalized === "apply_patch") {
     const files = Array.isArray(record.files) ? record.files : [];
-    return files.flatMap((file) => {
+    const filePaths = files.flatMap((file) => {
       const fileRecord = file && typeof file === "object" ? (file as Record<string, unknown>) : {};
       return pickPath(fileRecord.path).concat(
         pickPath(fileRecord.filePath),
         pickPath(fileRecord.file_path),
       );
     });
+    const patchPaths = typeof record.patch === "string" ? extractPathsFromPatchText(record.patch) : [];
+    return uniqueStrings(filePaths.concat(patchPaths));
   }
 
   return [];
@@ -449,7 +541,9 @@ function extractPathsForTool(toolName: unknown, params: unknown): string[] {
 type UsedSkillReadEntry = {
   readAtCallIndex: number;
   realpath: string;
-  correlationSession: string;
+  correlationSession?: string;
+  correlationSessions?: Set<string>;
+  nearbyToolError?: boolean;
 };
 
 function suppressSelfEditByRealpath(
@@ -457,15 +551,215 @@ function suppressSelfEditByRealpath(
   editedRealpath: string,
   toolCallIndex: number,
   attributionWindow: number,
+  onRemoved?: (skillKey: string, entry: UsedSkillReadEntry) => void,
 ): string[] {
   const removed: string[] = [];
   for (const [skillKey, entry] of usedSkills.entries()) {
     if (entry.realpath !== editedRealpath) continue;
     if (toolCallIndex - entry.readAtCallIndex > attributionWindow) continue;
+    onRemoved?.(skillKey, entry);
     usedSkills.delete(skillKey);
     removed.push(skillKey);
   }
   return removed;
+}
+
+type CorrelationState = {
+  correlationSession: string;
+  correlatedKeys: Map<string, Set<string>>;
+  displayResults: SkillSearchResult[];
+  usedKeysToEmit: Set<string>;
+  queryPreview: string;
+  feedbackUseEmitted: boolean;
+  createdAt: number;
+};
+
+type SkillUseHookSessionState = {
+  perCorrelation: Map<string, CorrelationState>;
+  usedSkills: Map<string, UsedSkillReadEntry>;
+  reportedFor: Set<string>;
+  feedbackUseEmittedFor: Set<string>;
+  toolCallIndex: number;
+  turnCounter: number;
+  agentEndSuccess: boolean | undefined;
+  flagEnabledAtStart: boolean;
+  createdAt: number;
+  lastSeenAt: number;
+  flushing?: Promise<void>;
+};
+
+function getOrCreateSkillUseSessionState(
+  sessions: Map<string, SkillUseHookSessionState>,
+  baseSession: string,
+  flagEnabledAtStart: boolean,
+): SkillUseHookSessionState {
+  let state = sessions.get(baseSession);
+  if (!state) {
+    const now = Date.now();
+    state = {
+      perCorrelation: new Map(),
+      usedSkills: new Map(),
+      reportedFor: new Set(),
+      feedbackUseEmittedFor: new Set(),
+      toolCallIndex: 0,
+      turnCounter: 0,
+      agentEndSuccess: undefined,
+      flagEnabledAtStart,
+      createdAt: now,
+      lastSeenAt: now,
+    };
+    sessions.set(baseSession, state);
+  } else {
+    state.lastSeenAt = Date.now();
+  }
+  return state;
+}
+
+function trimSkillUseSessions(
+  sessions: Map<string, SkillUseHookSessionState>,
+  logger?: PluginLogger,
+): void {
+  while (sessions.size > MAX_SKILL_USE_SESSIONS) {
+    let oldestKey = "";
+    let oldestLastSeen = Number.POSITIVE_INFINITY;
+    for (const [baseSession, state] of sessions.entries()) {
+      if (state.lastSeenAt < oldestLastSeen) {
+        oldestKey = baseSession;
+        oldestLastSeen = state.lastSeenAt;
+      }
+    }
+    if (!oldestKey) return;
+    logger?.warn(
+      `[sage-skill-read] session state limit exceeded; evicting oldest session ${oldestKey}`,
+    );
+    sessions.delete(oldestKey);
+  }
+}
+
+function trimSkillUseCorrelations(
+  baseSession: string,
+  state: SkillUseHookSessionState,
+  logger?: PluginLogger,
+): void {
+  while (state.perCorrelation.size > MAX_CORRELATIONS_PER_SESSION) {
+    let oldestKey = "";
+    let oldestCreatedAt = Number.POSITIVE_INFINITY;
+    for (const [correlationSession, correlation] of state.perCorrelation.entries()) {
+      if (correlation.createdAt < oldestCreatedAt) {
+        oldestKey = correlationSession;
+        oldestCreatedAt = correlation.createdAt;
+      }
+    }
+    if (!oldestKey) return;
+    logger?.warn(
+      `[sage-skill-read] correlation limit exceeded for ${baseSession}; evicting ${oldestKey}`,
+    );
+    state.perCorrelation.delete(oldestKey);
+    for (const [skillKey, entry] of Array.from(state.usedSkills.entries())) {
+      const sessions = entry.correlationSessions ?? new Set([entry.correlationSession ?? ""]);
+      sessions.delete(oldestKey);
+      if (sessions.size === 0) state.usedSkills.delete(skillKey);
+      else entry.correlationSessions = sessions;
+    }
+  }
+}
+
+function readSkillFrontmatterName(filePath: string): string | undefined {
+  const content = readFileSync(filePath, "utf8");
+  const normalized = content.replace(/^\uFEFF/, "");
+  if (!normalized.startsWith("---")) return undefined;
+
+  const lines = normalized.split(/\r?\n/);
+  if (lines[0].trim() !== "---") return undefined;
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "---") break;
+    const match = line.match(/^\s*name\s*:\s*(.*?)\s*$/);
+    if (!match) continue;
+    const raw = match[1].trim();
+    if (!raw) return "";
+    return raw.replace(/^['"]|['"]$/g, "").trim();
+  }
+  return undefined;
+}
+
+function skillFileFrontmatterMatchesDir(filePath: string): boolean {
+  const dirName = basename(dirname(filePath));
+  const frontmatterName = readSkillFrontmatterName(filePath);
+  return !frontmatterName || frontmatterName === dirName;
+}
+
+function isSkillMarkdownPath(path: string): boolean {
+  return basename(path) === "SKILL.md";
+}
+
+function eventIndicatesToolError(event: any): boolean {
+  if (event?.error) return true;
+  const result = event?.result;
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    if (record.isError === true || record.error) return true;
+  }
+  return false;
+}
+
+function coerceBooleanLike(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (["true", "passed", "pass", "success", "succeeded", "ok", "complete", "completed"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "failed", "fail", "failure", "error", "errored", "cancelled", "canceled"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
+}
+
+function extractAgentEndSuccess(event: any): boolean | undefined {
+  const direct = coerceBooleanLike(event?.success);
+  if (direct !== undefined) return direct;
+
+  const status = coerceBooleanLike(event?.status);
+  if (status !== undefined) return status;
+
+  const result = event?.result && typeof event.result === "object" ? event.result : undefined;
+  const resultSuccess = coerceBooleanLike(result?.success);
+  if (resultSuccess !== undefined) return resultSuccess;
+
+  const resultStatus = coerceBooleanLike(result?.status);
+  if (resultStatus !== undefined) return resultStatus;
+
+  if (event?.error) return false;
+  return undefined;
+}
+
+function isSubagentLifecycleEvent(event: any, ctx?: any): boolean {
+  const markers = [
+    event?.type,
+    event?.action,
+    event?.hook,
+    event?.name,
+    event?.event,
+    ctx?.type,
+    ctx?.action,
+    ctx?.hook,
+  ];
+  if (markers.some((value) => typeof value === "string" && value.toLowerCase().includes("subagent"))) {
+    return true;
+  }
+  if (event?.isSubagent === true || ctx?.isSubagent === true) return true;
+  if (event?.parentAgentId || event?.parentRunId || ctx?.parentAgentId || ctx?.parentRunId) return true;
+  if (typeof event?.agentKind === "string" && event.agentKind.toLowerCase() === "subagent") return true;
+  if (typeof ctx?.agentKind === "string" && ctx.agentKind.toLowerCase() === "subagent") return true;
+  return false;
 }
 
 function extractEventModel(event: any): string {
@@ -676,6 +970,12 @@ const plugin = {
     const suggestLimit = clampInt(pluginCfg.suggestLimit, 3, 1, 10);
     const minPromptLen = clampInt(pluginCfg.minPromptLen, 12, 0, 500);
     const maxPromptBytes = clampInt(pluginCfg.maxPromptBytes, 16_384, 512, 65_536);
+    // Read once at plugin registration. Operators should restart/reload OpenClaw
+    // after changing this opt-in hook flag; mid-session flips are not polled.
+    const skillUseDetectionHookEnabled =
+      envGet("OPENCLAW_SAGE_TOOL_CALL_HOOK") === "1" ||
+      pluginCfg.toolCallHookEnabled === true ||
+      pluginCfg.skillUseDetectionHookEnabled === true;
 
     // Heartbeat context-aware suggestions
     const heartbeatContextSuggest = pluginCfg.heartbeatContextSuggest !== false;
@@ -717,6 +1017,7 @@ const plugin = {
     const scanCache = new Map<string, { ts: number; scan: SecurityScanResult }>();
     const SCAN_CACHE_LIMIT = 256;
     const SCAN_CACHE_TTL_MS = 5 * 60_000;
+    const skillUseSessions = new Map<string, SkillUseHookSessionState>();
 
     const scanText = async (text: string): Promise<SecurityScanResult | null> => {
       if (!sageBridge) return null;
@@ -875,6 +1176,7 @@ const plugin = {
     const skillOutcomeState = {
       usedSkillKey: "",
       reportedSkillKey: "",
+      sessionId: "",
     };
 
     const runCaptureHook = async (
@@ -937,8 +1239,9 @@ const plugin = {
     const flushSkillOutcome = (status: "passed" | "failed", sessionId?: string): void => {
       const skillKey = skillOutcomeState.usedSkillKey;
       if (!skillKey || skillOutcomeState.reportedSkillKey === skillKey) return;
+      const outcomeSessionId = sessionId || skillOutcomeState.sessionId;
 
-      void reportSkillOutcome(skillKey, status, sessionId)
+      void reportSkillOutcome(skillKey, status, outcomeSessionId)
         .then(() => {
           skillOutcomeState.reportedSkillKey = skillKey;
         })
@@ -947,6 +1250,342 @@ const plugin = {
             `[sage-skill-outcome] feedback failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         });
+    };
+
+    const runOpenClawHookSage = (
+      args: string[],
+      sessionId?: string,
+      timeout = 5_000,
+    ) =>
+      runCommand(sageBinary, args, {
+        env: {
+          ...sageEnv,
+          SAGE_SOURCE: "openclaw-hook",
+          SAGE_SESSION_ID: sessionId ?? "",
+        },
+        timeout,
+      });
+
+    const registerSkillUseCorrelation = async (
+      baseSession: string,
+      prompt: string,
+    ): Promise<string> => {
+      const normalizedPrompt = normalizePrompt(prompt, { maxBytes: maxPromptBytes });
+      if (!baseSession || !normalizedPrompt) return "";
+
+      const state = getOrCreateSkillUseSessionState(
+        skillUseSessions,
+        baseSession,
+        skillUseDetectionHookEnabled,
+      );
+      trimSkillUseSessions(skillUseSessions, api.logger);
+      const turn = ++state.turnCounter;
+      const correlationSession = `${baseSession}__turn_${turn}`;
+      const queryPreview = normalizePrompt(normalizedPrompt, { maxBytes: 240 });
+
+      const suggestResult = await runOpenClawHookSage(
+        [
+          "suggest",
+          "skill",
+          normalizedPrompt,
+          "--format",
+          "json",
+          "--limit",
+          String(suggestLimit),
+          "--source",
+          "openclaw-hook",
+          "--session",
+          correlationSession,
+        ],
+        correlationSession,
+        8_000,
+      );
+
+      if (suggestResult.code !== 0) {
+        api.logger.info(
+          `[sage-skill-read] suggest correlation skipped for ${correlationSession}: ${suggestResult.stderr || `exit=${suggestResult.code}`}`,
+        );
+        return "";
+      }
+
+      const suggestedSkills = parseSkillSuggestionResults(suggestResult.stdout);
+      const correlatedKeys = new Map<string, Set<string>>();
+      const displayResults: SkillSearchResult[] = [];
+
+      const resolvedStatuses = await Promise.all(suggestedSkills.map(async (result) => {
+        const key = typeof result.key === "string" ? result.key.trim() : "";
+        if (!key || !isValidSkillKey(key)) return null;
+
+        const statusResult = await runOpenClawHookSage(
+          ["skill", "status", key, "--format", "json"],
+          correlationSession,
+          5_000,
+        );
+        if (statusResult.code !== 0) {
+          api.logger.info(
+            `[sage-skill-read] no status paths for ${key}: ${statusResult.stderr || `exit=${statusResult.code}`}`,
+          );
+          return null;
+        }
+
+        const resolution = resolveSkillStatusSkillMdRealpaths(statusResult.stdout);
+        if (!resolution.preferred.length) {
+          api.logger.info(`[sage-skill-read] no verified exposed SKILL.md paths for ${key}`);
+          return null;
+        }
+
+        return { result, key, paths: resolution.preferred };
+      }));
+
+      for (const resolved of resolvedStatuses) {
+        if (!resolved) continue;
+        const { result, key, paths } = resolved;
+        correlatedKeys.set(key, new Set(paths));
+        displayResults.push(result);
+      }
+
+      state.perCorrelation.set(correlationSession, {
+        correlationSession,
+        correlatedKeys,
+        displayResults,
+        usedKeysToEmit: new Set(),
+        queryPreview,
+        feedbackUseEmitted: false,
+        createdAt: Date.now(),
+      });
+      trimSkillUseCorrelations(baseSession, state, api.logger);
+
+      return formatSkillSuggestions(displayResults, suggestLimit);
+    };
+
+    const handleSkillRead = (
+      state: SkillUseHookSessionState,
+      path: string,
+      toolCallIndex: number,
+    ): void => {
+      if (!isSkillMarkdownPath(path)) return;
+
+      let readRealpath = "";
+      try {
+        readRealpath = realpathSync(path);
+      } catch {
+        return;
+      }
+      if (!isSkillMarkdownPath(readRealpath)) return;
+
+      try {
+        if (!skillFileFrontmatterMatchesDir(readRealpath)) return;
+      } catch {
+        return;
+      }
+
+      const matches: Array<{ skillKey: string; correlationSession: string }> = [];
+      for (const [correlationSession, correlation] of state.perCorrelation.entries()) {
+        for (const [skillKey, expectedPaths] of correlation.correlatedKeys.entries()) {
+          if (expectedPaths.has(readRealpath)) matches.push({ skillKey, correlationSession });
+        }
+      }
+      if (!matches.length) {
+        api.logger.info(`[sage-skill-read] SKILL.md read did not match a registered realpath: ${readRealpath}`);
+        return;
+      }
+
+      for (const { skillKey, correlationSession } of matches) {
+        const correlation = state.perCorrelation.get(correlationSession);
+        if (!correlation) continue;
+        correlation.usedKeysToEmit.add(skillKey);
+
+        const existing = state.usedSkills.get(skillKey);
+        const correlationSessions =
+          existing && existing.realpath === readRealpath && existing.correlationSessions
+            ? new Set(existing.correlationSessions)
+            : new Set<string>();
+        correlationSessions.add(correlationSession);
+
+        state.usedSkills.set(skillKey, {
+          readAtCallIndex: toolCallIndex,
+          realpath: readRealpath,
+          correlationSessions,
+          nearbyToolError: existing?.nearbyToolError === true,
+        });
+      }
+    };
+
+    const handleSkillSelfEdit = (
+      state: SkillUseHookSessionState,
+      path: string,
+      toolCallIndex: number,
+    ): void => {
+      if (!isSkillMarkdownPath(path)) return;
+
+      let editedRealpath = "";
+      try {
+        editedRealpath = realpathSync(path);
+      } catch {
+        return;
+      }
+
+      suppressSelfEditByRealpath(
+        state.usedSkills,
+        editedRealpath,
+        toolCallIndex,
+        SKILL_READ_ATTRIBUTION_WINDOW,
+        (skillKey, entry) => {
+          const sessions = entry.correlationSessions ?? new Set([entry.correlationSession ?? ""]);
+          for (const correlationSession of sessions) {
+            if (!correlationSession) continue;
+            state.perCorrelation.get(correlationSession)?.usedKeysToEmit.delete(skillKey);
+          }
+        },
+      );
+    };
+
+    const handleSkillUseAfterToolCall = async (event: any, ctx: any): Promise<void> => {
+      if (!skillUseDetectionHookEnabled) return;
+      const baseSession = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
+      if (!baseSession) return;
+      const state = skillUseSessions.get(baseSession);
+      if (!state) return;
+
+      const toolCallIndex = ++state.toolCallIndex;
+      const toolName = normalizeOpenClawToolName(event?.toolName ?? event?.name ?? event?.tool);
+      const params = event?.params ?? event?.input ?? event?.toolInput ?? {};
+      const paths = extractPathsForTool(toolName, params);
+
+      if (READ_TOOLS.has(toolName)) {
+        for (const path of paths) handleSkillRead(state, path, toolCallIndex);
+      } else if (EDIT_TOOLS.has(toolName)) {
+        for (const path of paths) handleSkillSelfEdit(state, path, toolCallIndex);
+      }
+
+      if (eventIndicatesToolError(event)) {
+        for (const entry of state.usedSkills.values()) {
+          if (toolCallIndex - entry.readAtCallIndex <= SKILL_READ_ATTRIBUTION_WINDOW) {
+            entry.nearbyToolError = true;
+          }
+        }
+      }
+    };
+
+    const queryPreviewForEntry = (
+      state: SkillUseHookSessionState,
+      entry: UsedSkillReadEntry,
+    ): string => {
+      const sessions = entry.correlationSessions ?? new Set([entry.correlationSession ?? ""]);
+      for (const correlationSession of sessions) {
+        const preview = state.perCorrelation.get(correlationSession)?.queryPreview;
+        if (preview) return preview;
+      }
+      return "";
+    };
+
+    const outcomeStatusForEntry = (
+      state: SkillUseHookSessionState,
+      entry: UsedSkillReadEntry,
+    ): "passed" | "failed" => {
+      if (state.agentEndSuccess === false) return "failed";
+      if (entry.nearbyToolError && state.agentEndSuccess === undefined) return "failed";
+      return "passed";
+    };
+
+    const flushTerminal = async (
+      baseSession: string,
+      terminalEvent?: any,
+      opts?: { cleanupAfterFlush?: boolean },
+    ): Promise<void> => {
+      if (!skillUseDetectionHookEnabled || !baseSession) return;
+      const state = skillUseSessions.get(baseSession);
+      if (!state) return;
+      state.lastSeenAt = Date.now();
+
+      const terminalSuccess = extractAgentEndSuccess(terminalEvent);
+      if (terminalSuccess !== undefined) state.agentEndSuccess = terminalSuccess;
+
+      if (state.flushing) return state.flushing;
+
+      state.flushing = (async () => {
+        const correlationSnapshot = Array.from(state.perCorrelation.entries()).map(
+          ([correlationSession, correlation]) => ({
+            correlationSession,
+            feedbackUseEmitted: correlation.feedbackUseEmitted,
+            usedKeys: Array.from(correlation.usedKeysToEmit).filter(isValidSkillKey),
+          }),
+        );
+        const usedSkillSnapshot = Array.from(state.usedSkills.entries()).map(([skillKey, entry]) => ({
+          skillKey,
+          queryPreview: queryPreviewForEntry(state, entry),
+          status: outcomeStatusForEntry(state, entry),
+        }));
+
+        for (const { correlationSession, feedbackUseEmitted, usedKeys } of correlationSnapshot) {
+          if (
+            feedbackUseEmitted ||
+            state.feedbackUseEmittedFor.has(correlationSession)
+          ) {
+            continue;
+          }
+          if (!usedKeys.length) continue;
+
+          const args = [
+            "suggest",
+            "feedback",
+            "use",
+            "--used",
+            ...usedKeys,
+            "--source",
+            "openclaw-hook",
+            "--session",
+            correlationSession,
+          ];
+          const result = await runOpenClawHookSage(args, correlationSession, 8_000);
+          if (result.code === 0) {
+            const liveCorrelation = state.perCorrelation.get(correlationSession);
+            if (liveCorrelation) liveCorrelation.feedbackUseEmitted = true;
+            state.feedbackUseEmittedFor.add(correlationSession);
+          } else {
+            api.logger.warn(
+              `[sage-skill-read] feedback use failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
+            );
+          }
+        }
+
+        for (const { skillKey, queryPreview, status } of usedSkillSnapshot) {
+          if (!isValidSkillKey(skillKey)) continue;
+          if (state.reportedFor.has(skillKey)) continue;
+
+          const args = [
+            "suggest",
+            "feedback",
+            "outcome",
+            skillKey,
+            "--status",
+            status,
+            "--source",
+            "openclaw-hook",
+            "--session",
+            baseSession,
+            "--query-preview",
+            queryPreview,
+          ];
+          const result = await runOpenClawHookSage(args, baseSession, 8_000);
+          if (result.code === 0) {
+            state.reportedFor.add(skillKey);
+          } else {
+            api.logger.warn(
+              `[sage-skill-read] feedback outcome failed for ${skillKey}: ${result.stderr || `exit=${result.code}`}`,
+            );
+          }
+        }
+      })();
+
+      try {
+        await state.flushing;
+      } finally {
+        state.flushing = undefined;
+        if (opts?.cleanupAfterFlush) {
+          skillUseSessions.delete(baseSession);
+        }
+      }
     };
 
     const scanHookPayload = async (
@@ -1096,9 +1735,10 @@ const plugin = {
             onSkillUsed: (skillKey: string) => {
               skillOutcomeState.usedSkillKey = skillKey;
               skillOutcomeState.reportedSkillKey = "";
+              skillOutcomeState.sessionId = captureState.sessionId;
             },
             onSkillFailed: (skillKey: string) => {
-              void reportSkillOutcome(skillKey, "failed").catch((outcomeErr: unknown) => {
+              void reportSkillOutcome(skillKey, "failed", captureState.sessionId).catch((outcomeErr: unknown) => {
                 api.logger.warn(
                   `[sage-skill-outcome] feedback failed: ${outcomeErr instanceof Error ? outcomeErr.message : String(outcomeErr)}`,
                 );
@@ -1192,8 +1832,10 @@ const plugin = {
       }, { name: "sage-command-new-scan" });
 
       api.registerHook("command:stop", async (event: any) => {
+        if (isSubagentLifecycleEvent(event)) return;
         const sessionId = resolveOpenClawSessionId(event, null, { internal: true });
         flushSkillOutcome("passed", sessionId);
+        await flushTerminal(sessionId, event, { cleanupAfterFlush: true });
         if (envGet("SAGE_OPENCLAW_SECURITY_SCAN") === "0") return;
         const response = pickString(
           event?.response,
@@ -1271,7 +1913,7 @@ const plugin = {
     };
 
     // Shared helper: gather dynamic per-turn context
-    const buildDynamicContext = async (prompt: string): Promise<string> => {
+    const buildDynamicContext = async (prompt: string, baseSession?: string): Promise<string> => {
       const parts: string[] = [];
 
       // Security guard
@@ -1296,7 +1938,17 @@ const plugin = {
       const explicitSage = isExplicitSagePrompt(prompt);
       if (!isHeartbeat && !explicitSage && prompt.length < minPromptLen) return parts.join("\n\n");
 
-      if (isHeartbeat && heartbeatContextSuggest && sageBridge?.isReady()) {
+      if (skillUseDetectionHookEnabled) {
+        if (baseSession) {
+          try {
+            suggestBlock = await registerSkillUseCorrelation(baseSession, prompt);
+          } catch (err) {
+            api.logger.warn(
+              `[sage-skill-read] suggest correlation failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+      } else if (isHeartbeat && heartbeatContextSuggest && sageBridge?.isReady()) {
         const now = Date.now();
         const cooldownElapsed =
           now - heartbeatSuggestState.lastFullAnalysisTs >= heartbeatSuggestCooldownMs;
@@ -1318,7 +1970,12 @@ const plugin = {
         }
       }
 
-      if (!suggestBlock && (autoSuggest || explicitSage) && sageBridge?.isReady()) {
+      if (
+        !skillUseDetectionHookEnabled &&
+        !suggestBlock &&
+        (autoSuggest || explicitSage) &&
+        sageBridge?.isReady()
+      ) {
         try {
           const raw = await sageSearch({
             domain: "skills",
@@ -1344,7 +2001,7 @@ const plugin = {
 
       const [stableContext, dynamicContext] = await Promise.all([
         buildStableContext(prompt),
-        buildDynamicContext(prompt),
+        buildDynamicContext(prompt, sessionId),
       ]);
 
       const result: Record<string, string> = {};
@@ -1353,18 +2010,26 @@ const plugin = {
       return Object.keys(result).length ? result : undefined;
     }, { priority: 90 });
 
+    if (skillUseDetectionHookEnabled) {
+      api.on("after_tool_call", handleSkillUseAfterToolCall);
+    }
+
     // Legacy OpenClaw hook names observed in older runtime builds.
     api.on("message_received", async (event: any, ctx: any) => {
       const sessionId = resolveOpenClawSessionId(event, ctx);
       capturePromptFromEvent("message_received", event, sessionId);
     });
     api.on("agent_end", async (event: any, ctx: any) => {
+      if (isSubagentLifecycleEvent(event, ctx)) return;
       const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
       captureResponseFromEvent("agent_end", event, sessionId);
+      await flushTerminal(sessionId, event, { cleanupAfterFlush: true });
     });
     api.on("session_end", async (event: any, ctx: any) => {
+      if (isSubagentLifecycleEvent(event, ctx)) return;
       const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
       flushSkillOutcome("passed", sessionId);
+      await flushTerminal(sessionId, event, { cleanupAfterFlush: true });
     });
   },
 };
@@ -1601,11 +2266,16 @@ export const __test = {
   SAGE_CONTEXT,
   normalizePrompt,
   extractJsonFromMcpResult,
+  parseSkillSuggestionResults,
+  isValidSkillKey,
   formatSkillSuggestions,
   resolveOpenClawSessionId,
   normalizeOpenClawToolName,
   extractPathsForTool,
+  extractPathsFromPatchText,
   suppressSelfEditByRealpath,
+  extractAgentEndSuccess,
+  isSubagentLifecycleEvent,
   isExplicitSagePrompt,
   soulStreamApplies,
   mcpSchemaToTypebox,

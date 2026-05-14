@@ -65,6 +65,10 @@
         "type": "boolean",
         "description": "Suggest relevant skills on ordinary prompts only when explicitly true; explicit @sage/sage_search/sage_execute and heartbeat can still trigger discovery (default: false)"
       },
+      "toolCallHookEnabled": {
+        "type": "boolean",
+        "description": "Enable default-off SKILL.md read detection via OpenClaw after_tool_call and terminal hooks. Equivalent to OPENCLAW_SAGE_TOOL_CALL_HOOK=1 (default: false)"
+      },
       "suggestLimit": {
         "type": "number",
         "description": "Max number of skill suggestions to include (default: 3)"

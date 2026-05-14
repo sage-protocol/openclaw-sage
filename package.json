@@ -25,7 +25,7 @@
     "build": "tsc -p tsconfig.build.json && node -e \"const fs=require('node:fs'); const p='dist/version.js'; fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('__PKG_VERSION__', process.env.npm_package_version || '0.0.0'));\"",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx src/mcp-bridge.test.ts && node --import tsx src/openclaw-hook.integration.test.ts",
+    "test": "node --import tsx src/skill-status-parse.test.ts && node --import tsx src/openclaw-skill-use.e2e.test.ts && node --import tsx src/mcp-bridge.test.ts && node --import tsx src/openclaw-hook.integration.test.ts",
     "test:e2e": "SAGE_E2E_OPENCLAW=1 npm test"
   },
   "dependencies": {
