@@ -159,12 +159,23 @@ type SkillSearchResult = {
   entryKind?: string;
 };
 
-const SKILL_KEY_PATTERN = /^[a-z0-9-]+$/;
+// Reject leading hyphen so a hostile key cannot shadow a CLI flag in argv
+// (`--source`, `-rm`, `-` etc.). 128 chars matches the daemon-side bound.
+const SKILL_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
 const MAX_SKILL_USE_SESSIONS = 32;
 const MAX_CORRELATIONS_PER_SESSION = 32;
 
 function isValidSkillKey(key: string): boolean {
   return SKILL_KEY_PATTERN.test(key);
+}
+
+// Mirrors upstream sessions/session-key-utils.ts:isSubagentSessionKey without
+// importing from upstream. A subagent's session key either starts with
+// "subagent:" (bare) or contains ":subagent:" (nested under agent:<id>:).
+function isSubagentSessionKey(sessionKey: string | undefined | null): boolean {
+  if (typeof sessionKey !== "string" || sessionKey.length === 0) return false;
+  const lower = sessionKey.toLowerCase();
+  return lower.startsWith("subagent:") || lower.includes(":subagent:");
 }
 
 function parseSkillSuggestionResults(raw: unknown): SkillSearchResult[] {
@@ -244,7 +255,9 @@ function extractSkillKeyFromExecuteParams(params: Record<string, unknown>): stri
   const raw = params.params;
   if (!raw || typeof raw !== "object") return "";
   const key = (raw as Record<string, unknown>).key;
-  return typeof key === "string" ? key.trim() : "";
+  if (typeof key !== "string") return "";
+  const trimmed = key.trim();
+  return isValidSkillKey(trimmed) ? trimmed : "";
 }
 
 function isHeartbeatPrompt(prompt: string): boolean {
@@ -742,24 +755,20 @@ function extractAgentEndSuccess(event: any): boolean | undefined {
 }
 
 function isSubagentLifecycleEvent(event: any, ctx?: any): boolean {
-  const markers = [
-    event?.type,
-    event?.action,
-    event?.hook,
-    event?.name,
-    event?.event,
-    ctx?.type,
-    ctx?.action,
-    ctx?.hook,
+  // Upstream OpenClaw identifies subagents by sessionKey prefix
+  // (see /tmp/pi-github-repos/openclaw/openclaw/src/sessions/session-key-utils.ts).
+  // Inspect every plausible session-key location on event/ctx — match if any indicates subagent.
+  const candidates = [
+    ctx?.sessionKey,
+    ctx?.sessionId,
+    event?.sessionKey,
+    event?.sessionId,
+    // PluginHookSubagentContext fields (subagent_spawned/ended hooks ship these directly):
+    ctx?.childSessionKey,
+    ctx?.requesterSessionKey,
+    event?.childSessionKey,
   ];
-  if (markers.some((value) => typeof value === "string" && value.toLowerCase().includes("subagent"))) {
-    return true;
-  }
-  if (event?.isSubagent === true || ctx?.isSubagent === true) return true;
-  if (event?.parentAgentId || event?.parentRunId || ctx?.parentAgentId || ctx?.parentRunId) return true;
-  if (typeof event?.agentKind === "string" && event.agentKind.toLowerCase() === "subagent") return true;
-  if (typeof ctx?.agentKind === "string" && ctx.agentKind.toLowerCase() === "subagent") return true;
-  return false;
+  return candidates.some((value) => isSubagentSessionKey(typeof value === "string" ? value : null));
 }
 
 function extractEventModel(event: any): string {
@@ -1200,6 +1209,12 @@ const plugin = {
       sessionId?: string,
     ): Promise<void> => {
       if (!skillKey) return;
+      if (!isValidSkillKey(skillKey)) {
+        api.logger.info(
+          `[sage-skill-read] reportSkillOutcome rejected non-canonical skill key: ${JSON.stringify(skillKey).slice(0, 64)}`,
+        );
+        return;
+      }
 
       const args = [
         "suggest",
@@ -1312,7 +1327,8 @@ const plugin = {
       const correlatedKeys = new Map<string, Set<string>>();
       const displayResults: SkillSearchResult[] = [];
 
-      const resolvedStatuses = await Promise.all(suggestedSkills.map(async (result) => {
+      // Use allSettled so one rejected sage-skill-status call does not abort the whole batch.
+      const settledStatuses = await Promise.allSettled(suggestedSkills.map(async (result) => {
         const key = typeof result.key === "string" ? result.key.trim() : "";
         if (!key || !isValidSkillKey(key)) return null;
 
@@ -1337,7 +1353,19 @@ const plugin = {
         return { result, key, paths: resolution.preferred };
       }));
 
-      for (const resolved of resolvedStatuses) {
+      for (let i = 0; i < settledStatuses.length; i++) {
+        const entry = settledStatuses[i];
+        if (entry.status === "rejected") {
+          const skillResult = suggestedSkills[i];
+          const failedKey = typeof skillResult?.key === "string" ? skillResult.key.trim() : "<unknown>";
+          api.logger.warn(
+            `[sage-skill-read] skill status fetch failed for ${failedKey}: ${
+              entry.reason instanceof Error ? entry.reason.message : String(entry.reason)
+            }`,
+          );
+          continue;
+        }
+        const resolved = entry.value;
         if (!resolved) continue;
         const { result, key, paths } = resolved;
         correlatedKeys.set(key, new Set(paths));
@@ -2031,6 +2059,14 @@ const plugin = {
       flushSkillOutcome("passed", sessionId);
       await flushTerminal(sessionId, event, { cleanupAfterFlush: true });
     });
+    // Upstream emits dedicated subagent_spawned / subagent_ended hooks with
+    // PluginHookSubagentContext. They must never flush parent state.
+    api.on("subagent_spawned", async (_event: any, _ctx: any) => {
+      api.logger.info("[sage-skill-read] subagent_spawned observed; ignoring for flush state");
+    });
+    api.on("subagent_ended", async (_event: any, _ctx: any) => {
+      api.logger.info("[sage-skill-read] subagent_ended observed; ignoring for flush state");
+    });
   },
 };
 
@@ -2268,6 +2304,8 @@ export const __test = {
   extractJsonFromMcpResult,
   parseSkillSuggestionResults,
   isValidSkillKey,
+  isSubagentSessionKey,
+  extractSkillKeyFromExecuteParams,
   formatSkillSuggestions,
   resolveOpenClawSessionId,
   normalizeOpenClawToolName,

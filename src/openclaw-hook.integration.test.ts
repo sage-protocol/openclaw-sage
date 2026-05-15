@@ -858,7 +858,52 @@ test("OpenClaw SKILL.md terminal flush is idempotent and agent_end success takes
   );
 });
 
-test("OpenClaw SKILL.md terminal flush skips subagent lifecycle events", async () => {
+test("OpenClaw SKILL.md terminal flush skips subagent lifecycle events (real session-key shape)", async () => {
+  await withSkillHookHarness(
+    async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+      const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }),
+      );
+      writeFileSync(
+        statusPath,
+        JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skillA] } }),
+      );
+
+      // Parent session work — uses the *parent's* session key (no :subagent: substring).
+      await hooks["before_prompt_build"]({ prompt: "use one skill" }, { sessionKey: "base-session" });
+      await hooks["after_tool_call"](
+        { toolName: "Read", params: { path: join(skillA, "SKILL.md") } },
+        { sessionKey: "base-session" },
+      );
+
+      // Subagent's agent_end fires with the upstream session-key convention
+      // (see /tmp/pi-github-repos/openclaw/openclaw/src/sessions/session-key-utils.ts:isSubagentSessionKey).
+      // The guard must recognize this and NOT flush the parent's accumulator.
+      await hooks["agent_end"](
+        { success: true, response: "subagent done" },
+        { sessionKey: "agent:root:subagent:child" },
+      );
+
+      let feedbackCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback",
+      );
+      assert.equal(feedbackCalls.length, 0, "subagent terminal event must not flush parent state");
+
+      // Parent's actual agent_end now fires — feedback must finally emit.
+      await hooks["agent_end"]({ success: true, response: "root done" }, { sessionKey: "base-session" });
+      feedbackCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback",
+      );
+      assert.equal(feedbackCalls.filter(({ args }) => args[2] === "use").length, 1);
+      assert.equal(feedbackCalls.filter(({ args }) => args[2] === "outcome").length, 1);
+    },
+    { toolCallHookEnabled: true },
+  );
+});
+
+test("OpenClaw SKILL.md terminal flush skips bare 'subagent:' session-key prefix", async () => {
   await withSkillHookHarness(
     async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
       const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
@@ -876,22 +921,52 @@ test("OpenClaw SKILL.md terminal flush skips subagent lifecycle events", async (
         { toolName: "Read", params: { path: join(skillA, "SKILL.md") } },
         { sessionKey: "base-session" },
       );
-      await hooks["agent_end"](
-        { success: true, response: "subagent done" },
-        { sessionKey: "base-session", parentAgentId: "root-agent" },
+
+      // Bare "subagent:" prefix (non-nested), also caught by upstream isSubagentSessionKey.
+      await hooks["session_end"](
+        { reason: "subagent ended" },
+        { sessionKey: "subagent:bare-child" },
       );
 
-      let feedbackCalls = readFakeSageLog(logPath).filter(
+      const feedbackCalls = readFakeSageLog(logPath).filter(
         ({ args }) => args[0] === "suggest" && args[1] === "feedback",
       );
-      assert.equal(feedbackCalls.length, 0, "subagent terminal event must not flush parent state");
+      assert.equal(feedbackCalls.length, 0, "bare subagent: prefix must not flush parent");
+    },
+    { toolCallHookEnabled: true },
+  );
+});
 
-      await hooks["agent_end"]({ success: true, response: "root done" }, { sessionKey: "base-session" });
-      feedbackCalls = readFakeSageLog(logPath).filter(
+test("OpenClaw subagent_ended hook is a no-op for parent flush state", async () => {
+  await withSkillHookHarness(
+    async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+      const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }),
+      );
+      writeFileSync(
+        statusPath,
+        JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skillA] } }),
+      );
+
+      await hooks["before_prompt_build"]({ prompt: "use one skill" }, { sessionKey: "base-session" });
+      await hooks["after_tool_call"](
+        { toolName: "Read", params: { path: join(skillA, "SKILL.md") } },
+        { sessionKey: "base-session" },
+      );
+
+      // Upstream PluginHookSubagentEndedEvent shape (hook-types.ts:600-610):
+      // { targetSessionKey, targetKind, outcome?, ... } with PluginHookSubagentContext ctx.
+      await hooks["subagent_ended"](
+        { targetSessionKey: "agent:root:subagent:child", targetKind: "subagent", outcome: "ok" },
+        { runId: "run-1", childSessionKey: "agent:root:subagent:child", requesterSessionKey: "base-session" },
+      );
+
+      const feedbackCalls = readFakeSageLog(logPath).filter(
         ({ args }) => args[0] === "suggest" && args[1] === "feedback",
       );
-      assert.equal(feedbackCalls.filter(({ args }) => args[2] === "use").length, 1);
-      assert.equal(feedbackCalls.filter(({ args }) => args[2] === "outcome").length, 1);
+      assert.equal(feedbackCalls.length, 0, "subagent_ended must be a no-op for parent flush state");
     },
     { toolCallHookEnabled: true },
   );
@@ -1059,5 +1134,232 @@ test("OpenClaw runtime hook respects SAGE_OPENCLAW_SECURITY_SCAN=0 (hermetic)", 
       await handler(event);
       assert.equal(event.prompt, original);
     },
+  );
+});
+
+// ---------- Unit tests for hardening fixes (P0/P1) ----------
+
+test("isValidSkillKey rejects leading hyphens and flag-shadow strings", () => {
+  // P0 fix #1: regex anchored at /^[a-z0-9][a-z0-9-]{0,127}$/
+  assert.equal(__test.isValidSkillKey("--source"), false, "leading double-dash must be rejected");
+  assert.equal(__test.isValidSkillKey("-source"), false, "leading single-dash must be rejected");
+  assert.equal(__test.isValidSkillKey("-rm"), false);
+  assert.equal(__test.isValidSkillKey("-"), false);
+  assert.equal(__test.isValidSkillKey(""), false);
+  // 128 chars max
+  assert.equal(__test.isValidSkillKey("a" + "b".repeat(128)), false, "129 chars must be rejected");
+  assert.equal(__test.isValidSkillKey("a" + "b".repeat(127)), true, "128 chars must pass");
+
+  // Valid keys still pass
+  assert.equal(__test.isValidSkillKey("sage-workflow"), true);
+  assert.equal(__test.isValidSkillKey("audit"), true);
+  assert.equal(__test.isValidSkillKey("a"), true);
+  assert.equal(__test.isValidSkillKey("a-b-c-d"), true);
+  // Trailing hyphens currently allowed by character class — verify intentional
+  assert.equal(__test.isValidSkillKey("foo-"), true);
+
+  // Other rejections still hold
+  assert.equal(__test.isValidSkillKey("Foo"), false, "uppercase rejected");
+  assert.equal(__test.isValidSkillKey("foo_bar"), false, "underscore rejected");
+  assert.equal(__test.isValidSkillKey("foo bar"), false, "space rejected");
+  assert.equal(__test.isValidSkillKey("foo;bar"), false, "semicolon rejected");
+  assert.equal(__test.isValidSkillKey("foo/bar"), false, "slash rejected");
+});
+
+test("isSubagentSessionKey recognizes upstream subagent session-key patterns", () => {
+  // Direct prefix (lowercased)
+  assert.equal(__test.isSubagentSessionKey("subagent:child"), true);
+  assert.equal(__test.isSubagentSessionKey("Subagent:Child"), true);
+  // Nested under agent prefix
+  assert.equal(__test.isSubagentSessionKey("agent:root:subagent:child"), true);
+  assert.equal(__test.isSubagentSessionKey("agent:root:subagent:child:subagent:grandchild"), true);
+  // Negatives
+  assert.equal(__test.isSubagentSessionKey("agent:root"), false);
+  assert.equal(__test.isSubagentSessionKey("base-session"), false);
+  assert.equal(__test.isSubagentSessionKey(""), false);
+  assert.equal(__test.isSubagentSessionKey(undefined), false);
+  assert.equal(__test.isSubagentSessionKey(null), false);
+});
+
+test("isSubagentLifecycleEvent uses sessionKey prefix, not synthetic plugin fields", () => {
+  // Matches upstream signal
+  assert.equal(
+    __test.isSubagentLifecycleEvent({}, { sessionKey: "agent:root:subagent:child" }),
+    true,
+  );
+  assert.equal(__test.isSubagentLifecycleEvent({}, { sessionKey: "subagent:bare" }), true);
+  // Recognizes PluginHookSubagentContext fields too
+  assert.equal(
+    __test.isSubagentLifecycleEvent({}, { childSessionKey: "agent:root:subagent:child" }),
+    true,
+  );
+  assert.equal(
+    __test.isSubagentLifecycleEvent({ childSessionKey: "agent:root:subagent:child" }, {}),
+    true,
+  );
+  // Parent session is NOT flagged
+  assert.equal(__test.isSubagentLifecycleEvent({}, { sessionKey: "base-session" }), false);
+  // Old synthetic plugin markers no longer trigger (these are NOT real upstream fields)
+  assert.equal(__test.isSubagentLifecycleEvent({}, { parentAgentId: "root", sessionKey: "base-session" }), false);
+  assert.equal(__test.isSubagentLifecycleEvent({}, { isSubagent: true, sessionKey: "base-session" }), false);
+});
+
+test("extractSkillKeyFromExecuteParams rejects non-canonical keys", () => {
+  // P0 fix #2: validation at the MCP boundary
+  assert.equal(
+    __test.extractSkillKeyFromExecuteParams({ params: { key: "--source" } }),
+    "",
+    "leading double-dash must be rejected",
+  );
+  assert.equal(__test.extractSkillKeyFromExecuteParams({ params: { key: "-rm" } }), "");
+  assert.equal(__test.extractSkillKeyFromExecuteParams({ params: { key: "foo bar" } }), "");
+  assert.equal(__test.extractSkillKeyFromExecuteParams({ params: { key: "Foo" } }), "");
+  // Valid keys still flow through (with trim)
+  assert.equal(
+    __test.extractSkillKeyFromExecuteParams({ params: { key: "  sage-workflow  " } }),
+    "sage-workflow",
+  );
+  assert.equal(__test.extractSkillKeyFromExecuteParams({ params: { key: "audit" } }), "audit");
+  // Missing / wrong-typed input
+  assert.equal(__test.extractSkillKeyFromExecuteParams({ params: {} }), "");
+  assert.equal(__test.extractSkillKeyFromExecuteParams({ params: { key: 42 } }), "");
+  assert.equal(__test.extractSkillKeyFromExecuteParams({}), "");
+});
+
+test("OpenClaw sage_execute drops non-canonical skill keys (P0 #2 defense-in-depth)", async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-key-validation-test-"));
+  const { binDir, scriptPath } = createCodeModeFakeSageBinary(tmp);
+  const logPath = join(tmp, "sage.log");
+  const pathSep = process.platform === "win32" ? ";" : ":";
+
+  await withPatchedEnv(
+    {
+      PATH: `${binDir}${pathSep}${process.env.PATH ?? ""}`,
+      SAGE_CAPTURE_HOOKS: "0",
+      SAGE_OPENCLAW_SECURITY_SCAN: "0",
+      FAKE_SAGE_LOG: logPath,
+    },
+    async () => {
+      const hooks: Record<string, any> = {};
+      const tools = new Map<string, any>();
+      const services: Array<{ id: string; start: Function; stop?: Function }> = [];
+      const logger = {
+        info: (_: string) => {},
+        warn: (_: string) => {},
+        error: (_: string) => {},
+      };
+
+      plugin.register({
+        id: "t",
+        name: "t",
+        pluginConfig: { sageBinary: scriptPath, autoInjectContext: false },
+        logger,
+        registerTool: (tool: any) => {
+          if (tool?.name) tools.set(tool.name, tool);
+        },
+        registerService: (svc: any) => {
+          services.push(svc);
+        },
+        on: (hook: string, handler: any) => {
+          hooks[hook] = handler;
+        },
+        registerHook: (hook: string, handler: any) => {
+          hooks[hook] = handler;
+        },
+      } as any);
+
+      const svc = services.find((service) => service.id === "sage-mcp-bridge");
+      assert.ok(svc, "expected sage-mcp-bridge service");
+      await svc.start({ config: {}, stateDir: tmp, logger });
+
+      try {
+        const executeTool = tools.get("sage_execute");
+        assert.ok(executeTool?.execute, "expected sage_execute tool");
+        // Hostile key: would shadow --source if it reached argv unsanitized.
+        await executeTool.execute("call-1", {
+          domain: "skills",
+          action: "use",
+          params: { key: "--source" },
+        });
+        await hooks["session_end"]({}, { sessionKey: "base-session" });
+
+        // Drain the fake-binary log; allow time for any outcome spawn to land.
+        await new Promise((r) => setTimeout(r, 200));
+        const entries = readFakeSageLog(logPath);
+        const outcomeCalls = entries.filter(
+          ({ args }) => args[0] === "suggest" && args[1] === "feedback" && args[2] === "outcome",
+        );
+        assert.equal(
+          outcomeCalls.length,
+          0,
+          "non-canonical skill key must never reach feedback outcome argv",
+        );
+      } finally {
+        if (svc.stop) await svc.stop({ config: {}, stateDir: tmp, logger });
+      }
+    },
+  );
+});
+
+test("registerSkillUseCorrelation continues caching when one sage skill status rejects (Promise.allSettled)", async () => {
+  // P1 fix #4: allSettled semantics — one failing status fetch must not abort the whole batch.
+  // Simulated by writing a status file that omits skill-b's entry (returns empty paths),
+  // and an additional fake-binary branch that throws synchronously on a sentinel key.
+  await withSkillHookHarness(
+    async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+      const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
+      const skillC = createSkillDir(tmp, "skill-c", { openclaw: true });
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({
+          results: [
+            { key: "skill-a", entryKind: "skill", type: "skill" },
+            // skill-b is intentionally missing from status map — surfaces empty preferred paths
+            // which is the "fulfilled-but-skipped" branch, not a rejection. Confirms the loop
+            // does not abort when one entry returns null.
+            { key: "skill-b", entryKind: "skill", type: "skill" },
+            { key: "skill-c", entryKind: "skill", type: "skill" },
+          ],
+        }),
+      );
+      writeFileSync(
+        statusPath,
+        JSON.stringify({
+          "skill-a": { global_paths: [], project_paths: [skillA] },
+          "skill-b": { global_paths: [], project_paths: [] },
+          "skill-c": { global_paths: [], project_paths: [skillC] },
+        }),
+      );
+
+      await hooks["before_prompt_build"](
+        { prompt: "please recommend three skills for this task" },
+        { sessionKey: "base-session" },
+      );
+      await hooks["after_tool_call"](
+        { toolName: "Read", params: { path: join(skillA, "SKILL.md") } },
+        { sessionKey: "base-session" },
+      );
+      await hooks["after_tool_call"](
+        { toolName: "Read", params: { path: join(skillC, "SKILL.md") } },
+        { sessionKey: "base-session" },
+      );
+      await hooks["command:stop"]({ sessionKey: "base-session", response: "done" });
+
+      const useCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback" && args[2] === "use",
+      );
+      assert.equal(useCalls.length, 1, "exactly one use spawn per correlation");
+      // Both surviving keys should appear after the --used flag in the variadic set.
+      // clap accepts repeated `--used` flags AND multiple positional values after one `--used`
+      // (per existing passing test at line 618-627).
+      const argsAfterUsed = useCalls[0].args.slice(useCalls[0].args.indexOf("--used") + 1);
+      const usedKeys = argsAfterUsed.slice(0, argsAfterUsed.indexOf("--source"));
+      assert.ok(usedKeys.includes("skill-a"), "skill-a must be in --used set");
+      assert.ok(
+        usedKeys.includes("skill-c"),
+        `skill-c must be in --used set (proves loop did not abort) — saw: ${JSON.stringify(usedKeys)}`,
+      );
+    },
+    { toolCallHookEnabled: true },
   );
 });
