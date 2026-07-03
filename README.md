@@ -82,12 +82,13 @@ actions when needed.
 
 ## Configuration
 
-Defaults are intentionally quiet:
+Defaults keep Sage context compact while surfacing concise skill suggestions:
 
 ```json
 {
   "autoInjectContext": true,
-  "autoSuggestSkills": false,
+  "autoSuggestSkills": true,
+  "autoSuggestCooldownMs": 20000,
   "toolCallHookEnabled": false,
   "suggestLimit": 3,
   "minPromptLen": 12,
@@ -100,8 +101,10 @@ Important options:
 - `sageBinary` sets the Sage CLI path. Default: `sage` from `PATH`.
 - `sageProfile` maps to `SAGE_PROFILE`.
 - `autoInjectContext` adds the compact Sage capability and identity context.
-- `autoSuggestSkills` restores legacy unsolicited skill suggestions on ordinary prompts.
+- `autoSuggestSkills` enables ordinary-prompt skill suggestions by default; set `false` to disable.
+- `autoSuggestCooldownMs` throttles default-on MCP auto-suggest requests per session. Default: `20000`; set `0` to disable the cooldown.
 - `toolCallHookEnabled` enables the opt-in `SKILL.md` read detector. The same behavior can be enabled for a process with `OPENCLAW_SAGE_TOOL_CALL_HOOK=1`. It is default-off and read once at plugin registration; restart/reload OpenClaw after changing it.
+- Hosts with an explicit suggestion rejection UI can call the exported `emitOpenClawHookSuggestionReject({ sessionId })` helper to send `sage suggest feedback reject --source openclaw-hook`.
 - `soulStreamDao` and `soulStreamLibraryId` opt into local soul stream context on governance-relevant turns.
 - `injectionGuardEnabled` enables deterministic prompt-injection scanning for outgoing `sage_execute` mutations.
 

@@ -19,7 +19,8 @@
 ### Changed
 
 * Reduced default Sage prompt-context noise in OpenClaw: ordinary prompts now get a compact Sage capability affordance instead of repeated long-form protocol orientation.
-* Changed skill suggestions to quiet-by-default. Normal prompts no longer receive unsolicited `## Suggested Skills` blocks unless `autoSuggestSkills: true` is explicitly configured.
+* Changed skill suggestions to default-on for ordinary prompts; set `autoSuggestSkills: false` to explicitly disable them.
+* Added per-session cooldown gating for default-on MCP auto-suggest requests with `autoSuggestCooldownMs` (default: 20 seconds).
 * Preserved explicit Sage discovery through `@sage`, `sage_search`, `sage_execute`, and Sage Protocol Heartbeat.
 * Gated optional soul-stream injection to governance-relevant prompts instead of injecting DAO/soul context on unrelated turns.
 * Clarified that capture/RLM hooks are emit-only and do not silently round-trip learned context into future prompts.
@@ -28,7 +29,8 @@
 
 * Documented an optional, manual Sage Capability Brief workflow for explicit breakpoints. The brief uses claim/evidence/confidence/action items, prior-art search before drafts, `[SILENT]` below threshold, local-only draft gates, and separate approval for any publish/promote/tip/vote/spend action.
 * Added before-prompt-build fixtures covering normal prompts, explicit Sage prompts, heartbeat prompts, and soul-stream relevance so context-size and unsolicited-suggestion behavior are regression-tested.
-* Added README guidance for restoring legacy skill suggestion behavior with `autoSuggestSkills: true`.
+* Documented skip feedback for surfaced-but-unused OpenClaw hook suggestion batches; each unused batch emits at most one skip signal, while empty or failed suggestion fetches emit none.
+* Exported `emitOpenClawHookSuggestionReject({ sessionId })` for hosts with an explicit suggestion rejection UI.
 * Clarified the U0 source-of-truth split: the published package plugin carries prompt-context behavior, while the embedded `sage init` plugin template remains bridge-only.
 * Added default-off OpenClaw `SKILL.md` read detection behind `OPENCLAW_SAGE_TOOL_CALL_HOOK=1` or `toolCallHookEnabled: true`.
 * Added per-turn `sage suggest skill ... --source openclaw-hook --session <base>__turn_<N>` correlation registration, status-path realpath provenance from `global_paths[]` / `project_paths[]`, and prompt display derived from the same correlated CLI result.

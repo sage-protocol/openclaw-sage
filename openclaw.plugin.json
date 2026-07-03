@@ -63,7 +63,11 @@
       },
       "autoSuggestSkills": {
         "type": "boolean",
-        "description": "Suggest relevant skills on ordinary prompts only when explicitly true; explicit @sage/sage_search/sage_execute and heartbeat can still trigger discovery (default: false)"
+        "description": "Suggest relevant skills on ordinary prompts unless explicitly disabled; explicit @sage/sage_search/sage_execute and heartbeat can still trigger discovery (default: true)"
+      },
+      "autoSuggestCooldownMs": {
+        "type": "number",
+        "description": "Milliseconds to wait between default-on MCP auto-suggest requests per session (default: 20000, set 0 to disable)"
       },
       "toolCallHookEnabled": {
         "type": "boolean",

@@ -311,7 +311,7 @@ test("SAGE_CONTEXT includes discovery affordance and stays thin", () => {
   assert.ok(ctx.includes("sage_execute"), "should mention sage_execute");
   assert.ok(ctx.includes("sage_status"), "should mention sage_status");
   assert.ok(ctx.includes("@sage"), "should describe explicit richer-discovery trigger");
-  assert.ok(ctx.includes("Ordinary prompts should stay quiet"), "should encode quiet-by-default posture");
+  assert.ok(ctx.includes("Skill suggestions may surface automatically"), "should encode auto-suggest posture");
   assert.ok(Buffer.byteLength(ctx, "utf8") < 1400, "stable card should remain compact");
   assert.ok(!ctx.includes("Wallet and auth troubleshooting"), "stable context should not preload auth manual");
   assert.ok(!ctx.includes("Collaboration Posture"), "stable context should not preload collaboration manual");
@@ -341,7 +341,15 @@ test("soulStreamApplies gates on DAO, non-generic library id, and narrow governa
   }
 });
 
-test("before_prompt_build measures normal prompts and omits unsolicited suggestions by default", async () => {
+test("default config has ordinary prompt skill suggestions enabled", () => {
+  assert.equal(__test.resolveAutoSuggestSkills({}), true);
+  assert.equal(__test.resolveAutoSuggestSkills({ autoSuggestSkills: false }), false);
+  assert.equal(__test.resolveAutoSuggestCooldownMs({}), 20_000);
+  assert.equal(__test.resolveAutoSuggestCooldownMs({ autoSuggestCooldownMs: 0 }), 0);
+  assert.equal(__test.resolveAutoSuggestCooldownMs({ autoSuggestCooldownMs: 50 }), 50);
+});
+
+test("before_prompt_build measures normal prompts without a ready bridge", async () => {
   const fake = createFakeSageCli();
   try {
     const hook = withEnv({ SAGE_CAPTURE_HOOKS: "0" }, () =>
@@ -362,7 +370,7 @@ test("before_prompt_build measures normal prompts and omits unsolicited suggesti
     }
 
     const normal = measurements[0];
-    assert.equal(normal.hasSuggestedSkills, false, "normal prompt should not get suggestions");
+    assert.equal(normal.hasSuggestedSkills, false, "normal prompt cannot get suggestions without a ready bridge");
     assert.ok(normal.stable.includes("Sage (Code Mode)"), "normal prompt keeps compact affordance");
     assert.ok(!normal.stable.includes("### Key Commands"), "identity block should not include command list");
     assert.ok(!normal.stable.includes("Distribution ladder"), "identity block should not duplicate protocol manual");

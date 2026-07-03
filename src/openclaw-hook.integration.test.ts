@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import plugin, { __test } from "./index.js";
+import plugin, { __test, emitOpenClawHookSuggestionReject } from "./index.js";
 
 function createFakeSageBinary(dir: string): { binDir: string } {
   const scriptPath = resolve(dir, "sage");
@@ -62,7 +62,13 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 
 if (process.env.FAKE_SAGE_LOG) {
-  fs.appendFileSync(process.env.FAKE_SAGE_LOG, JSON.stringify({ args }) + "\\n");
+  fs.appendFileSync(process.env.FAKE_SAGE_LOG, JSON.stringify({
+    args,
+    env: {
+      SAGE_SOURCE: process.env.SAGE_SOURCE,
+      SAGE_SESSION_ID: process.env.SAGE_SESSION_ID
+    }
+  }) + "\\n");
 }
 
 function readJsonFile(path, fallback) {
@@ -75,6 +81,10 @@ function readJsonFile(path, fallback) {
 }
 
 if (args[0] === "suggest" && args[1] === "skill") {
+  if (process.env.FAKE_SAGE_SUGGEST_FAIL === "1") {
+    process.stderr.write("suggest failed");
+    process.exit(1);
+  }
   const response = readJsonFile(process.env.FAKE_SAGE_SUGGEST_FILE, { results: [] });
   process.stdout.write(JSON.stringify(response));
   process.exit(0);
@@ -148,7 +158,14 @@ if (args[0] === "mcp" && args[1] === "start") {
       return;
     }
     if (msg.method === "tools/call") {
-      write(msg.id, { content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+      if (process.env.FAKE_SAGE_LOG) {
+        fs.appendFileSync(process.env.FAKE_SAGE_LOG, JSON.stringify({
+          args: [],
+          mcpTool: msg.params && msg.params.name,
+          mcpArgs: msg.params && msg.params.arguments
+        }) + "\\n");
+      }
+      write(msg.id, { content: [{ type: "text", text: JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }) }] });
       return;
     }
     write(msg.id, {});
@@ -187,7 +204,12 @@ function createSkillDir(root: string, key: string, opts?: { openclaw?: boolean; 
   return dir;
 }
 
-function readFakeSageLog(path: string): Array<{ args: string[] }> {
+function readFakeSageLog(path: string): Array<{
+  args: string[];
+  env?: { SAGE_SOURCE?: string; SAGE_SESSION_ID?: string };
+  mcpTool?: string;
+  mcpArgs?: unknown;
+}> {
   try {
     return readFileSync(path, "utf8")
       .trim()
@@ -482,6 +504,94 @@ test("OpenClaw SKILL.md hook remains default-off and registers no after_tool_cal
   });
 });
 
+test("OpenClaw SKILL.md hook respects autoSuggestSkills=false for ordinary prompts", async () => {
+  await withSkillHookHarness(
+    async ({ logPath, suggestPath, hooks }) => {
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }),
+      );
+
+      const ordinary = await hooks["before_prompt_build"](
+        { prompt: "please use a skill if relevant" },
+        { sessionKey: "base-session" },
+      );
+
+      assert.equal(ordinary?.prependContext, undefined);
+      assert.equal(
+        readFakeSageLog(logPath).some(
+          ({ args }) => args[0] === "suggest" && args[1] === "skill",
+        ),
+        false,
+      );
+    },
+    { toolCallHookEnabled: true, autoSuggestSkills: false },
+  );
+});
+
+test("OpenClaw SKILL.md hook still correlates explicit Sage prompts when autoSuggestSkills=false", async () => {
+  await withSkillHookHarness(
+    async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+      const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }),
+      );
+      writeFileSync(statusPath, JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skillA] } }));
+
+      const result = await hooks["before_prompt_build"](
+        { prompt: "@sage please find the relevant skill" },
+        { sessionKey: "base-session" },
+      );
+
+      assert.match(result?.prependContext ?? "", /skill-a/);
+      const suggestCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "skill",
+      );
+      assert.equal(suggestCalls.length, 1);
+    },
+    { toolCallHookEnabled: true, autoSuggestSkills: false },
+  );
+});
+
+test("emitOpenClawHookSuggestionReject emits reject with explicit source/session env", async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-reject-test-"));
+  const { scriptPath } = createSkillHookFakeSageBinary(tmp);
+  const logPath = join(tmp, "sage.log");
+  try {
+    await withPatchedEnv({ FAKE_SAGE_LOG: logPath }, async () => {
+      await emitOpenClawHookSuggestionReject({
+        sageBinary: scriptPath,
+        sessionId: "  base-session__turn_1  ",
+        env: { SAGE_SOURCE: "caller", SAGE_SESSION_ID: "caller-session" },
+      });
+    });
+
+    const reject = readFakeSageLog(logPath).find(
+      ({ args }) => args[0] === "suggest" && args[1] === "feedback" && args[2] === "reject",
+    );
+    assert.ok(reject, "expected reject feedback call");
+    assert.deepEqual(reject.args, [
+      "suggest",
+      "feedback",
+      "reject",
+      "--source",
+      "openclaw-hook",
+      "--session",
+      "base-session__turn_1",
+    ]);
+    assert.equal(reject.env?.SAGE_SOURCE, "openclaw-hook");
+    assert.equal(reject.env?.SAGE_SESSION_ID, "base-session__turn_1");
+
+    await assert.rejects(
+      () => emitOpenClawHookSuggestionReject({ sageBinary: scriptPath, sessionId: "   " }),
+      /non-blank sessionId/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("OpenClaw sage_execute skill-use outcome keeps source=openclaw and base session", async () => {
   const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-code-mode-test-"));
   const { binDir, scriptPath } = createCodeModeFakeSageBinary(tmp);
@@ -565,6 +675,81 @@ test("OpenClaw sage_execute skill-use outcome keeps source=openclaw and base ses
   );
 });
 
+test("OpenClaw default-on MCP auto-suggest fallback is cooldown-gated per session", async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-autosuggest-test-"));
+  const { binDir, scriptPath } = createCodeModeFakeSageBinary(tmp);
+  const logPath = join(tmp, "sage.log");
+  const pathSep = process.platform === "win32" ? ";" : ":";
+
+  await withPatchedEnv(
+    {
+      PATH: `${binDir}${pathSep}${process.env.PATH ?? ""}`,
+      SAGE_CAPTURE_HOOKS: "0",
+      SAGE_OPENCLAW_SECURITY_SCAN: "0",
+      FAKE_SAGE_LOG: logPath,
+    },
+    async () => {
+      const hooks: Record<string, any> = {};
+      const services: Array<{ id: string; start: Function; stop?: Function }> = [];
+      const logger = {
+        info: (_: string) => {},
+        warn: (_: string) => {},
+        error: (_: string) => {},
+      };
+
+      plugin.register({
+        id: "t",
+        name: "t",
+        pluginConfig: {
+          sageBinary: scriptPath,
+          autoInjectContext: false,
+          autoSuggestCooldownMs: 20_000,
+        },
+        logger,
+        registerTool: (_tool: any) => {},
+        registerService: (svc: any) => {
+          services.push(svc);
+        },
+        on: (hook: string, handler: any) => {
+          hooks[hook] = handler;
+        },
+        registerHook: (_hook: string, _handler: any) => {},
+      } as any);
+
+      const svc = services.find((service) => service.id === "sage-mcp-bridge");
+      assert.ok(svc, "expected sage-mcp-bridge service");
+      await svc.start({ config: {}, stateDir: tmp, logger });
+      try {
+        await hooks["before_prompt_build"](
+          { prompt: "ordinary prompt should request skill suggestions" },
+          { sessionKey: "base-session" },
+        );
+        await hooks["before_prompt_build"](
+          { prompt: "ordinary prompt immediately after should be cooled down" },
+          { sessionKey: "base-session" },
+        );
+        await hooks["before_prompt_build"](
+          { prompt: "ordinary prompt in another session can request suggestions" },
+          { sessionKey: "other-session" },
+        );
+
+        const searchCalls = readFakeSageLog(logPath).filter((entry) => entry.mcpTool === "sage_search");
+        assert.equal(searchCalls.length, 2);
+        assert.deepEqual(
+          searchCalls.map((entry) => (entry.mcpArgs as any)?.params?.query),
+          [
+            "ordinary prompt should request skill suggestions",
+            "ordinary prompt in another session can request suggestions",
+          ],
+        );
+      } finally {
+        if (svc.stop) await svc.stop({ config: {}, stateDir: tmp, logger });
+      }
+    },
+  );
+  rmSync(tmp, { recursive: true, force: true });
+});
+
 test("OpenClaw SKILL.md read detection emits one feedback-use process per correlation", async () => {
   await withSkillHookHarness(
     async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
@@ -611,9 +796,11 @@ test("OpenClaw SKILL.md read detection emits one feedback-use process per correl
         ({ args }) => args[0] === "suggest" && args[1] === "feedback",
       );
       const useCalls = feedbackCalls.filter(({ args }) => args[2] === "use");
+      const skipCalls = feedbackCalls.filter(({ args }) => args[2] === "skip");
       const outcomeCalls = feedbackCalls.filter(({ args }) => args[2] === "outcome");
 
       assert.equal(useCalls.length, 1, "same-correlation skills should share one use process");
+      assert.equal(skipCalls.length, 0, "used suggestions must not also emit skip");
       assert.equal(useCalls[0].args.filter((arg) => arg === "--used").length, 1);
       assert.deepEqual(useCalls[0].args.slice(0, 8), [
         "suggest",
@@ -637,6 +824,119 @@ test("OpenClaw SKILL.md read detection emits one feedback-use process per correl
         assert.ok(call.args.includes("--status"));
         assert.ok(call.args.includes("passed"));
       }
+    },
+    { toolCallHookEnabled: true },
+  );
+});
+
+test("OpenClaw SKILL.md read detection emits one skip when surfaced suggestions are unused", async () => {
+  await withSkillHookHarness(
+    async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+      const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }),
+      );
+      writeFileSync(
+        statusPath,
+        JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skillA] } }),
+      );
+
+      await hooks["before_prompt_build"](
+        { prompt: "please recommend one skill for this task" },
+        { sessionKey: "base-session" },
+      );
+      await hooks["command:stop"]({ sessionKey: "base-session", response: "done" });
+
+      const feedbackCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback",
+      );
+      const skipCalls = feedbackCalls.filter(({ args }) => args[2] === "skip");
+      assert.equal(skipCalls.length, 1);
+      assert.deepEqual(skipCalls[0].args, [
+        "suggest",
+        "feedback",
+        "skip",
+        "--source",
+        "openclaw-hook",
+        "--session",
+        "base-session__turn_1",
+      ]);
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "use"), false);
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "outcome"), false);
+    },
+    { toolCallHookEnabled: true },
+  );
+});
+
+test("OpenClaw SKILL.md read detection emits use for one batch and skip for a later unused batch", async () => {
+  await withSkillHookHarness(
+    async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+      const skillA = createSkillDir(tmp, "skill-a", { openclaw: true });
+      writeFileSync(
+        suggestPath,
+        JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }),
+      );
+      writeFileSync(statusPath, JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skillA] } }));
+
+      await hooks["before_prompt_build"]({ prompt: "turn one should use a skill" }, { sessionKey: "base-session" });
+      await hooks["after_tool_call"](
+        { toolName: "Read", params: { path: join(skillA, "SKILL.md") } },
+        { sessionKey: "base-session" },
+      );
+      await hooks["before_prompt_build"]({ prompt: "turn two surfaces but is unused" }, { sessionKey: "base-session" });
+      await hooks["command:stop"]({ sessionKey: "base-session", response: "done" });
+
+      const feedbackCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback",
+      );
+      const useCalls = feedbackCalls.filter(({ args }) => args[2] === "use");
+      const skipCalls = feedbackCalls.filter(({ args }) => args[2] === "skip");
+      assert.equal(useCalls.length, 1);
+      assert.deepEqual(useCalls[0].args.slice(-2), ["--session", "base-session__turn_1"]);
+      assert.equal(skipCalls.length, 1);
+      assert.deepEqual(skipCalls[0].args.slice(-2), ["--session", "base-session__turn_2"]);
+    },
+    { toolCallHookEnabled: true },
+  );
+});
+
+test("OpenClaw SKILL.md read detection emits no skip for empty suggestion fetches", async () => {
+  await withSkillHookHarness(
+    async ({ logPath, suggestPath, hooks }) => {
+      writeFileSync(suggestPath, JSON.stringify({ results: [] }));
+
+      await hooks["before_prompt_build"]({ prompt: "turn with no matching skills" }, { sessionKey: "base-session" });
+      await hooks["command:stop"]({ sessionKey: "base-session", response: "done" });
+
+      const feedbackCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback",
+      );
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "skip"), false);
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "use"), false);
+    },
+    { toolCallHookEnabled: true },
+  );
+});
+
+test("OpenClaw SKILL.md read detection emits no skip for failed suggestion fetches", async () => {
+  await withSkillHookHarness(
+    async ({ logPath, hooks }) => {
+      const previous = process.env.FAKE_SAGE_SUGGEST_FAIL;
+      process.env.FAKE_SAGE_SUGGEST_FAIL = "1";
+      try {
+        await hooks["before_prompt_build"]({ prompt: "turn with failed suggestion fetch" }, { sessionKey: "base-session" });
+      } finally {
+        if (previous == null) delete process.env.FAKE_SAGE_SUGGEST_FAIL;
+        else process.env.FAKE_SAGE_SUGGEST_FAIL = previous;
+      }
+      await hooks["command:stop"]({ sessionKey: "base-session", response: "done" });
+
+      const feedbackCalls = readFakeSageLog(logPath).filter(
+        ({ args }) => args[0] === "suggest" && args[1] === "feedback",
+      );
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "skip"), false);
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "use"), false);
     },
     { toolCallHookEnabled: true },
   );
@@ -682,7 +982,9 @@ test("OpenClaw SKILL.md read detection rejects uncorrelated spoof paths and mism
       const feedbackCalls = readFakeSageLog(logPath).filter(
         ({ args }) => args[0] === "suggest" && args[1] === "feedback",
       );
-      assert.equal(feedbackCalls.length, 0);
+      assert.equal(feedbackCalls.filter(({ args }) => args[2] === "skip").length, 1);
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "use"), false);
+      assert.equal(feedbackCalls.some(({ args }) => args[2] === "outcome"), false);
     },
     { toolCallHookEnabled: true },
   );

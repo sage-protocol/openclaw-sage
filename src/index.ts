@@ -24,7 +24,7 @@ Default posture: search and inspect before activation; treat remote capabilities
 
 Visibility: install/expose is local; P2P/shared stay private; \`sage library push <library> --cloud\` starts private by default. Use \`sage library visibility <library-id> public\` only on explicit user request. Public feeds/search should advertise only anonymously readable prompts, skills, or CIDs.
 
-For richer Sage discovery or a capability review, ask explicitly with \`@sage\`, mention \`sage_search\` / \`sage_execute\`, or use Sage Protocol Heartbeat. Ordinary prompts should stay quiet.`;
+Skill suggestions may surface automatically on ordinary prompts. For richer Sage discovery or a capability review, ask explicitly with \`@sage\`, mention \`sage_search\` / \`sage_execute\`, or use Sage Protocol Heartbeat.`;
 
 /**
  * Minimal type stubs for OpenClaw plugin API.
@@ -67,6 +67,14 @@ type PluginApi = {
     opts?: { name?: string; priority?: number },
   ) => void;
 };
+
+function resolveAutoSuggestSkills(pluginCfg: Record<string, unknown>): boolean {
+  return pluginCfg.autoSuggestSkills !== false;
+}
+
+function resolveAutoSuggestCooldownMs(pluginCfg: Record<string, unknown>): number {
+  return clampInt(pluginCfg.autoSuggestCooldownMs, 20_000, 0, 3_600_000);
+}
 
 function clampInt(raw: unknown, def: number, min: number, max: number): number {
   const n = typeof raw === "string" && raw.trim() ? Number(raw) : Number(raw);
@@ -584,6 +592,7 @@ type CorrelationState = {
   usedKeysToEmit: Set<string>;
   queryPreview: string;
   feedbackUseEmitted: boolean;
+  feedbackSkipEmitted: boolean;
   createdAt: number;
 };
 
@@ -975,7 +984,8 @@ const plugin = {
         : undefined;
 
     const autoInject = pluginCfg.autoInjectContext !== false;
-    const autoSuggest = pluginCfg.autoSuggestSkills === true;
+    const autoSuggest = resolveAutoSuggestSkills(pluginCfg);
+    const autoSuggestCooldownMs = resolveAutoSuggestCooldownMs(pluginCfg);
     const suggestLimit = clampInt(pluginCfg.suggestLimit, 3, 1, 10);
     const minPromptLen = clampInt(pluginCfg.minPromptLen, 12, 0, 500);
     const maxPromptBytes = clampInt(pluginCfg.maxPromptBytes, 16_384, 512, 65_536);
@@ -1187,6 +1197,7 @@ const plugin = {
       reportedSkillKey: "",
       sessionId: "",
     };
+    const autoSuggestLastBySession = new Map<string, number>();
 
     const runCaptureHook = async (
       phase: "prompt" | "response",
@@ -1379,6 +1390,7 @@ const plugin = {
         usedKeysToEmit: new Set(),
         queryPreview,
         feedbackUseEmitted: false,
+        feedbackSkipEmitted: false,
         createdAt: Date.now(),
       });
       trimSkillUseCorrelations(baseSession, state, api.logger);
@@ -1536,6 +1548,8 @@ const plugin = {
           ([correlationSession, correlation]) => ({
             correlationSession,
             feedbackUseEmitted: correlation.feedbackUseEmitted,
+            feedbackSkipEmitted: correlation.feedbackSkipEmitted,
+            suggestionsSurfaced: correlation.displayResults.length > 0,
             usedKeys: Array.from(correlation.usedKeysToEmit).filter(isValidSkillKey),
           }),
         );
@@ -1545,21 +1559,51 @@ const plugin = {
           status: outcomeStatusForEntry(state, entry),
         }));
 
-        for (const { correlationSession, feedbackUseEmitted, usedKeys } of correlationSnapshot) {
-          if (
-            feedbackUseEmitted ||
-            state.feedbackUseEmittedFor.has(correlationSession)
-          ) {
+        for (const {
+          correlationSession,
+          feedbackUseEmitted,
+          feedbackSkipEmitted,
+          suggestionsSurfaced,
+          usedKeys,
+        } of correlationSnapshot) {
+          if (usedKeys.length) {
+            if (
+              feedbackUseEmitted ||
+              state.feedbackUseEmittedFor.has(correlationSession)
+            ) {
+              continue;
+            }
+
+            const args = [
+              "suggest",
+              "feedback",
+              "use",
+              "--used",
+              ...usedKeys,
+              "--source",
+              "openclaw-hook",
+              "--session",
+              correlationSession,
+            ];
+            const result = await runOpenClawHookSage(args, correlationSession, 8_000);
+            if (result.code === 0) {
+              const liveCorrelation = state.perCorrelation.get(correlationSession);
+              if (liveCorrelation) liveCorrelation.feedbackUseEmitted = true;
+              state.feedbackUseEmittedFor.add(correlationSession);
+            } else {
+              api.logger.warn(
+                `[sage-skill-read] feedback use failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
+              );
+            }
             continue;
           }
-          if (!usedKeys.length) continue;
+
+          if (!suggestionsSurfaced || feedbackSkipEmitted) continue;
 
           const args = [
             "suggest",
             "feedback",
-            "use",
-            "--used",
-            ...usedKeys,
+            "skip",
             "--source",
             "openclaw-hook",
             "--session",
@@ -1568,11 +1612,10 @@ const plugin = {
           const result = await runOpenClawHookSage(args, correlationSession, 8_000);
           if (result.code === 0) {
             const liveCorrelation = state.perCorrelation.get(correlationSession);
-            if (liveCorrelation) liveCorrelation.feedbackUseEmitted = true;
-            state.feedbackUseEmittedFor.add(correlationSession);
+            if (liveCorrelation) liveCorrelation.feedbackSkipEmitted = true;
           } else {
             api.logger.warn(
-              `[sage-skill-read] feedback use failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
+              `[sage-skill-read] feedback skip failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
             );
           }
         }
@@ -1968,12 +2011,15 @@ const plugin = {
 
       if (skillUseDetectionHookEnabled) {
         if (baseSession) {
-          try {
-            suggestBlock = await registerSkillUseCorrelation(baseSession, prompt);
-          } catch (err) {
-            api.logger.warn(
-              `[sage-skill-read] suggest correlation failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
+          const shouldCorrelate = autoSuggest || explicitSage || isHeartbeat;
+          if (shouldCorrelate) {
+            try {
+              suggestBlock = await registerSkillUseCorrelation(baseSession, prompt);
+            } catch (err) {
+              api.logger.warn(
+                `[sage-skill-read] suggest correlation failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
           }
         }
       } else if (isHeartbeat && heartbeatContextSuggest && sageBridge?.isReady()) {
@@ -2004,6 +2050,14 @@ const plugin = {
         (autoSuggest || explicitSage) &&
         sageBridge?.isReady()
       ) {
+        const shouldApplyCooldown = autoSuggest && !explicitSage;
+        const cooldownSession = baseSession || "__global__";
+        const now = Date.now();
+        if (shouldApplyCooldown && autoSuggestCooldownMs > 0) {
+          const lastSuggest = autoSuggestLastBySession.get(cooldownSession) ?? 0;
+          if (now - lastSuggest < autoSuggestCooldownMs) return parts.join("\n\n");
+          autoSuggestLastBySession.set(cooldownSession, now);
+        }
         try {
           const raw = await sageSearch({
             domain: "skills",
@@ -2295,12 +2349,50 @@ function registerCodeModeTools(
   );
 }
 
+export type OpenClawHookRejectOptions = {
+  sageBinary?: string;
+  sessionId: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+};
+
+export async function emitOpenClawHookSuggestionReject(
+  opts: OpenClawHookRejectOptions,
+) {
+  const sessionId = opts.sessionId.trim();
+  if (!sessionId) {
+    throw new TypeError("emitOpenClawHookSuggestionReject requires a non-blank sessionId");
+  }
+  return runCommand(
+    opts.sageBinary ?? "sage",
+    [
+      "suggest",
+      "feedback",
+      "reject",
+      "--source",
+      "openclaw-hook",
+      "--session",
+      sessionId,
+    ],
+    {
+      env: {
+        ...(opts.env ?? {}),
+        SAGE_SOURCE: "openclaw-hook",
+        SAGE_SESSION_ID: sessionId,
+      },
+      timeout: opts.timeoutMs ?? 8_000,
+    },
+  );
+}
+
 export default plugin;
 
 export const __test = {
   PKG_VERSION,
   SAGE_CONTEXT,
   normalizePrompt,
+  resolveAutoSuggestSkills,
+  resolveAutoSuggestCooldownMs,
   extractJsonFromMcpResult,
   parseSkillSuggestionResults,
   isValidSkillKey,
