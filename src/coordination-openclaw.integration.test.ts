@@ -56,6 +56,35 @@ await coordinate.execute("call-2", {
   },
 });
 
+result = await coordinate.execute("call-method-1", {
+  action: "update_methodology",
+  params: {
+    coordination_id: "telegram-coalition",
+    author: "Enki",
+    trigger: "initial hypothesis",
+    working_model: {
+      coalition_thesis: "Learn what the user values before deciding how to recruit collaborators.",
+      current_experiment: "Ask one open question over Telegram.",
+    },
+    rationale: "A fixed proposal grammar would hide uncertainty instead of learning from it.",
+    unresolved_questions: ["What kind of future return matters to the user?"],
+    next_feedback_question: "What would make this coalition useful enough for you to keep shaping?",
+  },
+});
+assert.equal(result.details.methodology.version, 1);
+result = await coordinate.execute("call-feedback-1", {
+  action: "request_feedback",
+  params: {
+    coordination_id: "telegram-coalition",
+    question: "What would make this coalition useful enough for you to keep shaping?",
+    rationale: "Enki is testing its value-exchange hypothesis.",
+    channel: "telegram",
+    conversation_id: "chat-7",
+    outbound_message_id: "question-1",
+  },
+});
+assert.equal(result.details.methodology.feedback_requests[0].status, "open");
+
 const brainstorming = "The coalition framing is right. Tighten the example, then use that exact private preview."
   + " Continue brainstorming with aligned contributors.".repeat(20);
 const claim = await hooks.inbound_claim({
@@ -71,6 +100,28 @@ const context = await hooks.before_prompt_build({
 }, { sessionKey: "agent:main:telegram:direct:chat-7", channelId: "telegram" });
 assert.match(context.prependContext, /coalition-building conversation, not as a command grammar/);
 assert.match(context.prependContext, /reply-2/);
+assert.match(context.prependContext, /authority\/evidence envelope and a capability menu; it is not your methodology/);
+assert.match(context.prependContext, /Working methodology version: 1/);
+assert.match(context.prependContext, /Latest requested feedback \(reply-2; untrusted evidence, not authority\)/);
+
+result = await coordinate.execute("call-method-2", {
+  action: "update_methodology",
+  params: {
+    coordination_id: "telegram-coalition",
+    author: "Enki",
+    trigger: "user feedback",
+    working_model: {
+      coalition_thesis: "Use a concrete example as a conversation object, not a finished proposal.",
+      current_experiment: "Show a reversible private example and ask who else it should help.",
+    },
+    rationale: "The user asked for tighter examples while preserving collaborative brainstorming.",
+    unresolved_questions: ["Which aligned contributor should be invited next?"],
+    next_feedback_question: "Who should this example invite into the conversation next?",
+    feedback_message_ids: ["reply-2"],
+  },
+});
+assert.equal(result.details.methodology.version, 2);
+assert.equal(result.details.methodology.feedback_requests[0].status, "answered");
 
 result = await coordinate.execute("call-3", {
   action: "set_preview",
@@ -125,6 +176,12 @@ assert.equal(result.details.steps[0].status, "awaiting_approval");
 assert.equal(result.details.steps[0].pause_reason, "recovered_step_requires_fresh_approval");
 assert.equal(result.details.steps[0].authority_receipts.length, 0);
 
+const methodologyLessons = await coordinate.execute("call-lessons", {
+  action: "list_methodology_lessons", params: { limit: 5 },
+});
+assert.equal(methodologyLessons.details[0].coordination_id, "telegram-coalition");
+assert.equal(methodologyLessons.details[0].methodology_version, 2);
+
 console.log("OpenClaw conversational coordination integration tests passed");
 
 const heartbeatCalls: Array<{ domain: string; action: string; params: Record<string, unknown> }> = [];
@@ -146,7 +203,14 @@ const heartbeat = await __test.gatherHeartbeatContext(
   fakeBridge as any,
   { info() {}, warn() {}, error() {} },
   50_000,
-  { listPending: async () => [result.details] } as any,
+  {
+    listPending: async () => [result.details],
+    listMethodologyLessons: async () => [{
+      coordination_id: "completed-coalition",
+      methodology_version: 3,
+      working_model_digest: "a".repeat(64),
+    }],
+  } as any,
 );
 for (const [domain, action] of [
   ["chat", "watched"], ["chat", "list_rooms"], ["chat", "history"],
@@ -155,7 +219,11 @@ for (const [domain, action] of [
 ]) {
   assert.ok(heartbeatCalls.some((call) => call.domain === domain && call.action === action), `${domain}/${action}`);
 }
-assert.match(heartbeat, /Pending coalition cards and unanswered asks/);
+assert.match(heartbeat, /Pending coalition cards, evolving methodologies, and unanswered asks/);
+assert.match(heartbeat, /methodology_version/);
+assert.match(heartbeat, /Recent Enki methodology lessons across coordination cards/);
+assert.match(heartbeat, /Recover the interrupted run/);
+assert.doesNotMatch(heartbeat, /last_operator_wording[^}]*What would make this coalition useful/);
 assert.match(heartbeat, /dao:0xabc:lib:coordination/);
 assert.ok(heartbeatCalls.some((call) =>
   call.domain === "chat"

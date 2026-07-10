@@ -64,6 +64,60 @@ export type CoordinationStepState = {
   error: string | null;
 };
 
+export type MethodologyRevision = {
+  version: number;
+  author: string;
+  trigger: string;
+  working_model: Record<string, unknown>;
+  rationale: string;
+  unresolved_questions: string[];
+  next_feedback_question: string | null;
+  evidence_refs: string[];
+  feedback_message_ids: string[];
+  revised_at: string;
+  previous_digest: string | null;
+  digest: string;
+};
+
+export type MethodologyFeedbackRequest = {
+  request_id: string;
+  methodology_version: number;
+  question: string;
+  rationale: string | null;
+  channel: string;
+  conversation_id: string;
+  outbound_message_id: string;
+  status: "open" | "answered" | "closed";
+  asked_at: string;
+  answered_at: string | null;
+  response_message_id: string | null;
+  raw_response: string | null;
+};
+
+export type CoordinationMethodology = {
+  version: number;
+  working_model: Record<string, unknown>;
+  rationale: string;
+  unresolved_questions: string[];
+  next_feedback_question: string | null;
+  updated_at: string;
+  history: MethodologyRevision[];
+  feedback_requests: MethodologyFeedbackRequest[];
+};
+
+export type MethodologyLesson = {
+  coordination_id: string;
+  objective: string;
+  state: CoordinationCard["state"];
+  methodology_version: number;
+  revision_digest: string | null;
+  working_model_digest: string;
+  working_model_excerpt: string;
+  rationale: string;
+  unresolved_questions: string[];
+  updated_at: string;
+};
+
 export type CoordinationCard = {
   schema_version: 1;
   coordination_id: string;
@@ -79,6 +133,7 @@ export type CoordinationCard = {
   authority_receipts: AuthorityReceipt[];
   verification_results: Array<Record<string, unknown>>;
   reward_governance_outcomes: Array<Record<string, unknown>>;
+  methodology: CoordinationMethodology;
   event_chain_anchor: string | null;
   conversation_messages: Array<{
     channel: string;
@@ -191,6 +246,29 @@ function materializeIdempotencyKey(template: string | undefined, vars: Record<st
   return value;
 }
 
+function emptyMethodology(at: string): CoordinationMethodology {
+  return {
+    version: 0,
+    working_model: {},
+    rationale: "",
+    unresolved_questions: [],
+    next_feedback_question: null,
+    updated_at: at,
+    history: [],
+    feedback_requests: [],
+  };
+}
+
+function boundedStrings(value: unknown, label: string, limit = 50): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error(`${label}_must_be_array`);
+  if (value.length > limit) throw new Error(`${label}_too_many`);
+  return value.map((item) => {
+    if (typeof item !== "string" || !item.trim()) throw new Error(`${label}_invalid`);
+    return item.trim().slice(0, 2_000);
+  });
+}
+
 export class CoordinationController {
   private readonly cardsDir: string;
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -278,6 +356,7 @@ export class CoordinationController {
         authority_receipts: [],
         verification_results: [],
         reward_governance_outcomes: [],
+        methodology: emptyMethodology(createdAt),
         event_chain_anchor: null,
         conversation_messages: [],
         events: [],
@@ -296,6 +375,12 @@ export class CoordinationController {
         throw new Error("invalid_coordination_card");
       }
       card.conversation_messages ??= [];
+      card.methodology ??= emptyMethodology(card.created_at || nowIso());
+      if (!Array.isArray(card.methodology.history)) card.methodology.history = [];
+      if (!Array.isArray(card.methodology.feedback_requests)) card.methodology.feedback_requests = [];
+      if (!Array.isArray(card.methodology.unresolved_questions)) card.methodology.unresolved_questions = [];
+      if (!card.methodology.working_model || typeof card.methodology.working_model !== "object"
+        || Array.isArray(card.methodology.working_model)) card.methodology.working_model = {};
       card.event_chain_anchor ??= null;
       for (const state of card.steps) state.preview_preserved_at ??= null;
       return card;
@@ -479,7 +564,161 @@ export class CoordinationController {
         received_at: nowIso(),
         permitted_authority: permittedAuthority,
       });
+      const feedback = [...card.methodology.feedback_requests].reverse().find((request) =>
+        request.status === "open"
+          && request.channel === channel
+          && request.conversation_id === conversationId,
+      );
+      if (feedback) {
+        feedback.status = "answered";
+        feedback.answered_at = nowIso();
+        feedback.response_message_id = input.message_id;
+        feedback.raw_response = input.raw_wording.slice(0, 4_000);
+        this.event(card, "methodology_feedback_received", card.current_step_id ?? undefined);
+      }
       this.event(card, "operator_wording_appended", card.current_step_id ?? undefined);
+      await this.write(card);
+      return card;
+    });
+  }
+
+  async updateMethodology(id: string, input: {
+    author: string;
+    trigger: string;
+    working_model: Record<string, unknown>;
+    rationale: string;
+    unresolved_questions?: string[];
+    next_feedback_question?: string;
+    evidence_refs?: string[];
+    feedback_message_ids?: string[];
+  }): Promise<CoordinationCard> {
+    return this.serialize(id, async () => {
+      const card = await this.get(id);
+      if (!input.working_model || typeof input.working_model !== "object" || Array.isArray(input.working_model)) {
+        throw new Error("methodology_working_model_required");
+      }
+      const encoded = JSON.stringify(input.working_model);
+      if (encoded.length > 64_000) throw new Error("methodology_working_model_too_large");
+      const author = input.author?.trim().slice(0, 256);
+      const trigger = input.trigger?.trim().slice(0, 256);
+      const rationale = input.rationale?.trim().slice(0, 8_000);
+      if (!author) throw new Error("methodology_author_required");
+      if (!trigger) throw new Error("methodology_trigger_required");
+      if (!rationale) throw new Error("methodology_rationale_required");
+      const feedbackMessageIds = boundedStrings(
+        input.feedback_message_ids,
+        "methodology_feedback_message_ids",
+      );
+      const missingFeedback = feedbackMessageIds.filter((messageId) =>
+        !card.methodology.feedback_requests.some((request) =>
+          request.status === "answered" && request.response_message_id === messageId,
+        ));
+      if (missingFeedback.length) {
+        throw new Error(`methodology_feedback_message_not_found:${missingFeedback.join(",")}`);
+      }
+      const revisedAt = nowIso();
+      const version = card.methodology.version + 1;
+      const revisionWithoutDigest = {
+        version,
+        author,
+        trigger,
+        working_model: input.working_model,
+        rationale,
+        unresolved_questions: boundedStrings(
+          input.unresolved_questions,
+          "methodology_unresolved_questions",
+        ),
+        next_feedback_question: input.next_feedback_question?.trim().slice(0, 2_000) || null,
+        evidence_refs: boundedStrings(input.evidence_refs, "methodology_evidence_refs"),
+        feedback_message_ids: feedbackMessageIds,
+        revised_at: revisedAt,
+        previous_digest: card.methodology.history.at(-1)?.digest ?? null,
+      };
+      const revision: MethodologyRevision = {
+        ...revisionWithoutDigest,
+        digest: digest(revisionWithoutDigest),
+      };
+      card.methodology.version = version;
+      card.methodology.working_model = revision.working_model;
+      card.methodology.rationale = revision.rationale;
+      card.methodology.unresolved_questions = revision.unresolved_questions;
+      card.methodology.next_feedback_question = revision.next_feedback_question;
+      card.methodology.updated_at = revisedAt;
+      card.methodology.history.push(revision);
+      if (card.methodology.history.length > 25) card.methodology.history.splice(0, 1);
+      this.event(card, "methodology_revised", card.current_step_id ?? undefined);
+      await this.write(card);
+      return card;
+    });
+  }
+
+  async recordFeedbackRequest(id: string, input: {
+    question: string;
+    rationale?: string;
+    channel: string;
+    conversation_id: string;
+    outbound_message_id: string;
+  }): Promise<CoordinationCard> {
+    return this.serialize(id, async () => {
+      const card = await this.get(id);
+      const question = input.question?.trim().slice(0, 4_000);
+      const channel = input.channel?.trim().toLowerCase();
+      if (!channel) throw new Error("feedback_message_identity_required");
+      const conversationId = normalizeConversationId(channel, input.conversation_id || "");
+      const messageId = input.outbound_message_id?.trim();
+      if (!question) throw new Error("feedback_question_required");
+      if (!conversationId || !messageId) throw new Error("feedback_message_identity_required");
+      if (card.methodology.feedback_requests.some((request) =>
+        request.channel === channel
+          && request.conversation_id === conversationId
+          && request.outbound_message_id === messageId,
+      )) return card;
+      const askedAt = nowIso();
+      for (const request of card.methodology.feedback_requests) {
+        if (request.status === "open" && request.channel === channel
+          && request.conversation_id === conversationId) request.status = "closed";
+      }
+      card.methodology.feedback_requests.push({
+        request_id: `feedback-${randomUUID()}`,
+        methodology_version: card.methodology.version,
+        question,
+        rationale: input.rationale?.trim().slice(0, 4_000) || null,
+        channel,
+        conversation_id: conversationId,
+        outbound_message_id: messageId,
+        status: "open",
+        asked_at: askedAt,
+        answered_at: null,
+        response_message_id: null,
+        raw_response: null,
+      });
+      if (card.methodology.feedback_requests.length > 100) {
+        card.methodology.feedback_requests.splice(0, 1);
+      }
+      card.conversation_messages.push({
+        channel,
+        conversation_id: conversationId,
+        message_id: messageId,
+        sender_id: "openclaw-agent",
+        sender_name: "Enki",
+        raw_wording: question,
+        direction: "outbound",
+        received_at: askedAt,
+        permitted_authority: "agent",
+      });
+      if (!card.chat_identities.some((identity) =>
+        String(identity.channel || "").toLowerCase() === channel
+          && String(identity.conversation_id || "") === conversationId,
+      )) {
+        card.chat_identities.push({
+          channel,
+          conversation_id: conversationId,
+          message_id: messageId,
+          direction: "outbound",
+          purpose: "methodology_feedback",
+        });
+      }
+      this.event(card, "methodology_feedback_requested", card.current_step_id ?? undefined);
       await this.write(card);
       return card;
     });
@@ -496,6 +735,38 @@ export class CoordinationController {
       if (error?.code === "ENOENT") return [];
       throw error;
     }
+  }
+
+  async listMethodologyLessons(limit = 5): Promise<MethodologyLesson[]> {
+    const boundedLimit = Math.max(1, Math.min(Number.isFinite(limit) ? Math.floor(limit) : 5, 20));
+    let names: string[];
+    try {
+      names = (await readdir(this.cardsDir)).filter((name) => name.endsWith(".json"));
+    } catch (error: any) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+    const cards = (await Promise.all(names.map((name) =>
+      this.get(name.slice(0, -5)).catch(() => null),
+    ))).filter((card): card is CoordinationCard => card !== null && card.methodology.version > 0);
+    return cards.sort((a, b) => b.methodology.updated_at.localeCompare(a.methodology.updated_at))
+      .slice(0, boundedLimit)
+      .map((card) => {
+        const encoded = JSON.stringify(card.methodology.working_model);
+        return {
+          coordination_id: card.coordination_id,
+          objective: card.objective.slice(0, 1_000),
+          state: card.state,
+          methodology_version: card.methodology.version,
+          revision_digest: card.methodology.history.at(-1)?.digest ?? null,
+          working_model_digest: digest(card.methodology.working_model),
+          working_model_excerpt: encoded.slice(0, 2_000),
+          rationale: card.methodology.rationale.slice(0, 1_000),
+          unresolved_questions: card.methodology.unresolved_questions.slice(0, 5)
+            .map((question) => question.slice(0, 500)),
+          updated_at: card.methodology.updated_at,
+        };
+      });
   }
 
   async start(id: string, stepId: string): Promise<CoordinationCard> {

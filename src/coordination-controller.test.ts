@@ -36,6 +36,7 @@ let card = await controller.create({
 });
 assert.equal(card.steps[0].status, "ready");
 assert.equal(card.steps[1].status, "pending");
+assert.equal(card.methodology.version, 0);
 
 card = await controller.start(card.coordination_id, "step-1");
 assert.equal(card.steps[0].status, "running");
@@ -75,10 +76,64 @@ assert.equal(card.steps[1].preview_digest, preview, "preview digest must use can
 card = await controller.recordChatIdentity(card.coordination_id, {
   channel: "telegram", conversation_id: "chat-7", message_id: "proposal-41", direction: "outbound",
 });
+card = await controller.updateMethodology(card.coordination_id, {
+  author: "Enki",
+  trigger: "initial self-critique",
+  working_model: {
+    thesis: "Start with a shared problem and learn which form of reciprocity attracts collaborators.",
+    discovery_style: "open-ended conversations before proposing artifacts",
+  },
+  rationale: "The behavior plan constrains authority but should not dictate how a coalition forms.",
+  unresolved_questions: ["Which value signal makes aligned contributors respond?"],
+  next_feedback_question: "What would make this collaboration feel worth your attention?",
+  evidence_refs: ["artifact:cid-1"],
+});
+assert.equal(card.methodology.version, 1);
+assert.equal(card.methodology.history[0].author, "Enki");
+card = await controller.recordFeedbackRequest(card.coordination_id, {
+  question: "What would make this collaboration feel worth your attention?",
+  rationale: "The current reciprocity model is still an assumption.",
+  channel: "telegram",
+  conversation_id: "chat-7",
+  outbound_message_id: "question-41",
+});
+assert.equal(card.methodology.feedback_requests[0].status, "open");
+card = await controller.recordFeedbackRequest(card.coordination_id, {
+  question: "Which concrete example should we use first?",
+  channel: "telegram",
+  conversation_id: "chat-7",
+  outbound_message_id: "question-42",
+});
+assert.equal(card.methodology.feedback_requests[0].status, "closed");
+assert.equal(card.methodology.feedback_requests[1].status, "open");
 card = (await controller.recordInboundMessage({
   channel: "telegram", conversation_id: "chat-7", message_id: "reply-42",
   sender_id: "operator-1", sender_name: "Operator", raw_wording: "Yes, use this exact preview.",
 }))!;
+assert.equal(card.methodology.feedback_requests[1].status, "answered");
+assert.equal(card.methodology.feedback_requests[1].response_message_id, "reply-42");
+await assert.rejects(
+  controller.updateMethodology(card.coordination_id, {
+    author: "Enki", trigger: "fabricated feedback", working_model: {}, rationale: "invalid",
+    feedback_message_ids: ["not-a-real-reply"],
+  }),
+  /methodology_feedback_message_not_found/,
+);
+card = await controller.updateMethodology(card.coordination_id, {
+  author: "Enki",
+  trigger: "operator feedback",
+  working_model: {
+    thesis: "Invite collaborators around a concrete example while keeping the purpose negotiable.",
+    discovery_style: "brainstorm first, then test one reversible collaboration artifact",
+  },
+  rationale: "The operator endorsed the coalition framing but asked for a tighter example.",
+  unresolved_questions: ["Which external contributor should see the first example?"],
+  next_feedback_question: "Who is the first person or agent this example should help?",
+  feedback_message_ids: ["reply-42"],
+});
+assert.equal(card.methodology.version, 2);
+assert.deepEqual(card.methodology.history[1].feedback_message_ids, ["reply-42"]);
+assert.equal(card.methodology.history[1].previous_digest, card.methodology.history[0].digest);
 await assert.rejects(
   controller.approve(card.coordination_id, {
     step_id: "step-2", actor: "agent-1", authority: "agent", preview_digest: preview,
@@ -112,7 +167,12 @@ assert.ok(card.chat_identities.some((identity) => identity.message_id === "42"))
 const persisted = JSON.parse(await readFile(join(stateDir, "cards", "test-coordination.json"), "utf8"));
 assert.equal(persisted.state, "completed");
 assert.equal(persisted.authority_receipts.length, 1);
+assert.equal(persisted.methodology.version, 2);
 assert.equal(persisted.events[1].previous_digest, persisted.events[0].digest);
+const completedLessons = await controller.listMethodologyLessons();
+assert.equal(completedLessons[0].coordination_id, "test-coordination");
+assert.equal(completedLessons[0].state, "completed");
+assert.match(completedLessons[0].working_model_digest, /^[a-f0-9]{64}$/);
 
 assert.deepEqual(stepRequiresApproval({
   id: "legacy", title: "Legacy", skill_key: "legacy", instruction: "legacy",

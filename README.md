@@ -117,21 +117,48 @@ Declared credentials are `SAGE_IPFS_UPLOAD_TOKEN`, `KEYSTORE_PASSWORD`, and
 
 ### Coordination controller and Telegram replies
 
-Sage selects a capability and returns a portable, machine-readable
-`behaviorPlan`; it does **not** execute the plan. OpenClaw owns the controller
-lifecycle through `sage_coordination`:
+Sage selects capabilities and returns a portable, machine-readable
+`behaviorPlan`; it does **not** execute the plan or prescribe how a coalition
+must form. The plan is an authority/evidence envelope and capability menu.
+OpenClaw owns the adaptive methodology and controller lifecycle through
+`sage_coordination`:
 
 ```text
-create -> start read/draft step -> complete with evidence
-       -> preserve exact side-effect preview -> Telegram conversation
-       -> digest-bound approval receipt -> resume one checkpoint
+observe context -> author a working methodology -> try a reversible interaction
+                -> ask one high-information Telegram question when uncertain
+                -> bind the raw reply to the question and revise the methodology
+                -> preserve an exact side-effect preview only when one emerges
+                -> digest-bound approval receipt -> resume one checkpoint
 ```
 
-The controller persists the coordination card, step state, artifacts, chat
-message identities, raw inbound operator wording, authority receipts,
-verification results, and reward/governance outcomes. `chat`, `private_write`,
-`public_write`, `payment`, and `governance` are always checkpointed, including
-legacy plans that omit annotations. Approvals require all of:
+The controller persists the coordination card, versioned agent-authored working
+methodology, unresolved questions, feedback requests and linked raw replies,
+step state, artifacts, chat message identities, authority receipts, verification
+results, and reward/governance outcomes. The methodology is deliberately an
+open JSON working model: Enki may invent and revise its own discovery,
+coalition-building, experiment, outreach, and reciprocity concepts instead of
+following a keyword funnel. Heartbeats and the read-only
+`list_methodology_lessons` action expose bounded, provenance-linked summaries of
+recent methodology revisions across both live and completed cards. Enki chooses
+whether and how those lessons alter a new card; the controller never auto-merges
+old operator wording into a new methodology.
+
+OpenClaw records each sent question with `request_feedback`, then cites the
+actual inbound message identity in `update_methodology`. This creates a
+provenance trail without requiring Enki to accept every suggestion; its revision
+rationale can preserve disagreement or explain why the evidence did not change
+the model.
+
+`request_feedback` records a question after the Telegram transport returns its
+message identity; it does not send the message or grant chat authority. The
+OpenClaw transport policy may allow Enki to ask the designated operator
+questions autonomously. Outreach to other people remains a checkpointed `chat`
+effect under the behavior authority envelope.
+
+Autonomy stops at authority boundaries, not at methodological choices. `chat`,
+`private_write`, `public_write`, `payment`, and `governance` are always
+checkpointed, including legacy plans that omit annotations. Approvals require
+all of:
 
 1. an exact preserved preview digest;
 2. an inbound Telegram message identity on the same coordination card;
