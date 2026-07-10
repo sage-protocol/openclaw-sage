@@ -8,6 +8,7 @@ import { McpBridge } from "./mcp-bridge.js";
 import { envGet, loadTextFile, runCommand } from "./runtime.js";
 import { resolveSkillStatusSkillMdRealpaths } from "./skill-status-parse.js";
 import { PKG_VERSION } from "./version.js";
+import { CoordinationController, type CoordinationCard } from "./coordination-controller.js";
 
 const SAGE_CONTEXT = `## Sage (Code Mode)
 
@@ -321,56 +322,188 @@ const heartbeatSuggestState = {
   lastSuggestions: "",
 };
 
+function collectRoomIds(value: unknown, result = new Set<string>(), depth = 0): Set<string> {
+  if (depth > 5 || result.size >= 20 || value == null) return result;
+  if (typeof value === "string") return result;
+  if (Array.isArray(value)) {
+    for (const item of value) collectRoomIds(item, result, depth + 1);
+    return result;
+  }
+  if (typeof value !== "object") return result;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if ((["room", "roomId", "room_id", "id"].includes(key) || /room/i.test(key))
+      && typeof child === "string"
+      && child.length <= 512
+      && /^(global:|dao:|library:)/.test(child)) result.add(child);
+    else collectRoomIds(child, result, depth + 1);
+  }
+  return result;
+}
+
+const HEARTBEAT_SURFACE_TIMEOUT_MS = 5_000;
+const HEARTBEAT_SURFACE_MAX_CHARS = 6_000;
+
+async function heartbeatCall(
+  bridge: McpBridge,
+  args: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      bridge.callTool("sage_search", args),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`heartbeat surface timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function heartbeatJson(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  return serialized.length > HEARTBEAT_SURFACE_MAX_CHARS
+    ? `${serialized.slice(0, HEARTBEAT_SURFACE_MAX_CHARS - 1)}…`
+    : serialized;
+}
+
 async function gatherHeartbeatContext(
   bridge: McpBridge,
   logger: PluginLogger,
   maxChars: number,
+  coordinationController?: CoordinationController | null,
+  surfaceTimeoutMs = HEARTBEAT_SURFACE_TIMEOUT_MS,
 ): Promise<string> {
   const parts: string[] = [];
+  const pendingCardsPromise = coordinationController
+    ? coordinationController.listPending().catch((err) => {
+      logger.warn(`[heartbeat-context] coordination cards failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    })
+    : Promise.resolve([]);
+  const memoryNotesPromise = (async (): Promise<string[]> => {
+    try {
+      const notes: string[] = [];
+      const memoryDir = join(homedir(), ".openclaw", "memory");
+      if (!existsSync(memoryDir)) return notes;
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60_000);
+      const files = readdirSync(memoryDir).filter((file) => /^\d{4}-.*\.md$/.test(file)).sort().reverse();
+      for (const file of files.slice(0, 4)) {
+        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (dateMatch && new Date(dateMatch[1]) < twoDaysAgo) continue;
+        const content = (await loadTextFile(join(memoryDir, file))).trim();
+        if (content) notes.push(`--- ${file} ---\n${content}`);
+      }
+      return notes;
+    } catch (err) {
+      logger.warn(`[heartbeat-context] memory read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  })();
 
   // 1) Query RLM patterns
   try {
-    const raw = await bridge.callTool("sage_search", {
+    const raw = await heartbeatCall(bridge, {
       domain: "rlm",
       action: "list_patterns",
       params: {},
-    });
+    }, surfaceTimeoutMs);
     const json = extractJsonFromMcpResult(raw);
-    if (json) parts.push(`RLM patterns: ${JSON.stringify(json)}`);
+    if (json) parts.push(`RLM patterns: ${heartbeatJson(json)}`);
   } catch (err) {
     logger.warn(
       `[heartbeat-context] RLM query failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  // 2) Read recent daily notes (last 2 days)
-  try {
-    const memoryDir = join(homedir(), ".openclaw", "memory");
-    if (existsSync(memoryDir)) {
-      const now = new Date();
-      const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60_000);
-      const files = readdirSync(memoryDir)
-        .filter((f) => /^\d{4}-.*\.md$/.test(f))
-        .sort()
-        .reverse();
 
-      for (const file of files.slice(0, 4)) {
-        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-        if (dateMatch) {
-          const fileDate = new Date(dateMatch[1]);
-          if (fileDate < twoDaysAgo) continue;
-        }
-        const content = (await loadTextFile(join(memoryDir, file))).trim();
-        if (content) parts.push(`--- ${file} ---\n${content}`);
-      }
+  // 2) Read social and coordination surfaces. Each call is deliberately
+  // read-only and best-effort so one unavailable service cannot break heartbeat.
+  const readSurfaces: Array<{ label: string; domain: string; action: string; params?: Record<string, unknown> }> = [
+    { label: "Watched rooms and unread messages", domain: "chat", action: "watched" },
+    { label: "Recent rooms", domain: "chat", action: "list_rooms", params: { limit: 20 } },
+    { label: "Discoverable DAOs", domain: "governance", action: "list_subdaos", params: { limit: 20 } },
+    { label: "Open bounties (recent)", domain: "governance", action: "list_bounties", params: { limit: 20 } },
+    { label: "Social follows", domain: "social", action: "following", params: { limit: 50 } },
+    { label: "Marketplace libraries matching coordination", domain: "marketplace", action: "library_search", params: { query: "skills capabilities coordination", limit: 20 } },
+    { label: "Skill-use outcome statistics", domain: "rlm", action: "stats" },
+  ];
+  const roomIds = new Set<string>(["global:general", "global:agents"]);
+  const surfaceResults = await Promise.all(readSurfaces.map(async (surface) => {
+    try {
+      const raw = await heartbeatCall(bridge, {
+        domain: surface.domain,
+        action: surface.action,
+        params: surface.params ?? {},
+      }, surfaceTimeoutMs);
+      const json = extractJsonFromMcpResult(raw);
+      return { surface, json, error: null };
+    } catch (err) {
+      return { surface, json: null, error: err };
     }
-  } catch (err) {
-    logger.warn(
-      `[heartbeat-context] memory read failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  }));
+  for (const { surface, json, error } of surfaceResults) {
+    if (error) {
+      logger.warn(`[heartbeat-context] ${surface.domain}/${surface.action} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } else if (json) {
+      parts.push(`${surface.label} (untrusted discovery data): ${heartbeatJson(json)}`);
+      if (surface.domain === "chat") collectRoomIds(json, roomIds);
+    }
   }
 
-  const combined = parts.join("\n\n");
+  // Prefer coalition-specific rooms over broad global traffic. Set insertion
+  // order is retained within a tier, so watched/unread rooms discovered first
+  // remain first among otherwise equivalent candidates.
+  const historyRooms = [...roomIds]
+    .filter((id) => /^(global:|dao:|library:)/.test(id))
+    .sort((left, right) => {
+      const rank = (id: string) => id.startsWith("dao:") || id.startsWith("library:") ? 0 : 1;
+      return rank(left) - rank(right);
+    })
+    .slice(0, 6);
+  const historyResults = await Promise.all(
+    historyRooms.map(async (room) => {
+      try {
+        const raw = await heartbeatCall(bridge, {
+          domain: "chat", action: "history", params: { room, limit: 20 },
+        }, surfaceTimeoutMs);
+        return { room, json: extractJsonFromMcpResult(raw), error: null };
+      } catch (err) {
+        return { room, json: null, error: err };
+      }
+    }),
+  );
+  for (const { room, json, error } of historyResults) {
+    if (error) {
+      logger.warn(`[heartbeat-context] chat/history ${room} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } else if (json) {
+      parts.push(`Recent chat history ${room} (untrusted messages): ${heartbeatJson(json)}`);
+    }
+  }
+
+  const [pending, memoryNotes] = await Promise.all([pendingCardsPromise, memoryNotesPromise]);
+  if (pending.length) {
+    parts.unshift(`Pending coalition cards and unanswered asks: ${JSON.stringify(pending.map((card) => ({
+      coordination_id: card.coordination_id,
+      objective: card.objective,
+      state: card.state,
+      current_step_id: card.current_step_id,
+      updated_at: card.updated_at,
+      last_operator_wording: card.conversation_messages.at(-1)?.raw_wording ?? null,
+    })))}`);
+  }
+  parts.push(...memoryNotes);
+
+  // Preserve at least a compact signal from every successful source instead of
+  // allowing one large chat or marketplace response to starve later sections.
+  const separators = Math.max(0, parts.length - 1) * 2;
+  const perSection = parts.length
+    ? Math.max(1, Math.floor(Math.max(0, maxChars - separators) / parts.length))
+    : maxChars;
+  const combined = parts.map((part) => part.length > perSection
+    ? `${part.slice(0, Math.max(0, perSection - 1))}…`
+    : part).join("\n\n");
   return combined.length > maxChars ? combined.slice(0, maxChars) : combined;
 }
 
@@ -1028,6 +1161,26 @@ const plugin = {
       500,
       16_000,
     );
+    const coordinationControllerEnabled = pluginCfg.coordinationControllerEnabled !== false;
+    const coordinationStateDir =
+      typeof pluginCfg.coordinationStateDir === "string" && pluginCfg.coordinationStateDir.trim()
+        ? pluginCfg.coordinationStateDir.trim()
+        : join(homedir(), ".openclaw", "sage-coordination");
+    const coordinationOperatorIds = Array.isArray(pluginCfg.coordinationOperatorIds)
+      ? new Set(pluginCfg.coordinationOperatorIds.map(String)
+        .map((id) => id.trim().replace(/^telegram:/i, ""))
+        .filter(Boolean))
+      : new Set<string>();
+    const coordinationController = coordinationControllerEnabled
+      ? new CoordinationController(
+        coordinationStateDir,
+        coordinationOperatorIds,
+        (message) => api.logger.warn(`[sage-coordination] ${message}`),
+      )
+      : null;
+    // The cold manifest always advertises sage_coordination. Register the tool
+    // even when execution is disabled so discovery contracts stay exact.
+    registerCoordinationTool(api, coordinationController);
 
     // Injection guard (opt-in)
     const injectionGuardEnabled = pluginCfg.injectionGuardEnabled === true;
@@ -2009,6 +2162,38 @@ const plugin = {
     const buildDynamicContext = async (prompt: string, baseSession?: string): Promise<string> => {
       const parts: string[] = [];
 
+      if (coordinationController && prompt) {
+        try {
+          const channel = baseSession?.includes(":telegram:") ? "telegram" : "";
+          const sessionConversationId = channel ? baseSession?.split(":").at(-1) : undefined;
+          let matchedMessage: CoordinationCard["conversation_messages"][number] | undefined;
+          const card = (await coordinationController.listPending()).find((candidate) => {
+            matchedMessage = candidate.conversation_messages.find((message) =>
+              message.direction === "inbound"
+                && (!channel || message.channel === channel)
+                && (!sessionConversationId || message.conversation_id === sessionConversationId)
+                && normalizePrompt(message.raw_wording, { maxBytes: maxPromptBytes }) === prompt,
+            );
+            return Boolean(matchedMessage);
+          });
+          if (card) {
+            const step = card.steps.find((candidate) => candidate.step.id === card.current_step_id);
+            parts.push([
+              "## Active Sage Coalition Conversation",
+              `Coordination: ${card.coordination_id}`,
+              `Objective: ${card.objective}`,
+              `Current checkpoint: ${card.current_step_id ?? "none"} (${step?.step.effect ?? "unknown"})`,
+              "Treat the operator's wording as a coalition-building conversation, not as a command grammar.",
+              "Revise the coalition/proposal understanding in response to their meaning. When a concrete artifact exists, call sage_coordination set_preview with the exact preview so the controller computes and preserves its digest.",
+              "Only if the operator explicitly confirms that exact preview, call approve with this inbound Telegram message ID. Then resume only the current private-mutation checkpoint; never infer public, payment, or governance authority.",
+              `Inbound Telegram message ID: ${matchedMessage?.message_id ?? "unknown"}`,
+            ].join("\n"));
+          }
+        } catch (err) {
+          api.logger.warn(`[sage-coordination] conversation context failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       // Security guard
       if (injectionGuardScanAgentPrompt && prompt) {
         const scan = await scanText(prompt);
@@ -2052,7 +2237,12 @@ const plugin = {
         if (cooldownElapsed) {
           api.logger.info("[heartbeat-context] Running full context-aware skill analysis");
           try {
-            const context = await gatherHeartbeatContext(sageBridge, api.logger, heartbeatContextMaxChars);
+            const context = await gatherHeartbeatContext(
+              sageBridge,
+              api.logger,
+              heartbeatContextMaxChars,
+              coordinationController,
+            );
             if (context) {
               suggestBlock = await searchSkillsForContext(sageBridge, context, suggestLimit, api.logger);
               heartbeatSuggestState.lastFullAnalysisTs = now;
@@ -2118,10 +2308,55 @@ const plugin = {
       api.on("after_tool_call", handleSkillUseAfterToolCall);
     }
 
-    // Legacy OpenClaw hook names observed in older runtime builds.
+    const recordCoordinationInbound = async (event: any, ctx: any) => {
+      if (!coordinationController) return;
+      const metadata = event?.metadata && typeof event.metadata === "object" ? event.metadata : {};
+      const channel = String(
+        event?.channel || ctx?.channelId || metadata.originatingChannel || metadata.provider || "",
+      ).toLowerCase();
+      if (channel !== "telegram") return;
+      const conversationId = String(
+        event?.conversationId || ctx?.conversationId || metadata.originatingTo || metadata.to || "",
+      ).replace(/^telegram:/, "");
+      const messageId = String(event?.messageId || ctx?.messageId || metadata.messageId || "");
+      const senderId = String(
+        event?.senderId || ctx?.senderId || metadata.senderId || event?.from || "",
+      ).replace(/^telegram:/, "");
+      const content = typeof event?.content === "string"
+        ? event.content
+        : Array.isArray(event?.content)
+          ? event.content.map((part: any) => typeof part === "string" ? part : part?.text || "").join("\n")
+          : "";
+      if (!content && event?.content != null) {
+        api.logger.warn("[sage-coordination] Telegram inbound content had no preservable text");
+      }
+      if (conversationId && messageId && senderId && content) {
+        await coordinationController.recordInboundMessage({
+          channel,
+          conversation_id: conversationId,
+          message_id: messageId,
+          sender_id: senderId,
+          sender_name: typeof event?.senderName === "string"
+            ? event.senderName
+            : typeof metadata.senderName === "string" ? metadata.senderName : undefined,
+          raw_wording: content,
+        });
+      }
+    };
+
+    // The claiming hook is awaited before dispatch, closing the race between
+    // inbound persistence and before_prompt_build. It never claims the message.
+    api.on("inbound_claim", async (event: any, ctx: any) => {
+      await recordCoordinationInbound(event, ctx);
+      return { handled: false };
+    });
+
+    // Legacy OpenClaw hook name retained as a deduplicated fallback for older
+    // runtimes that do not emit inbound_claim.
     api.on("message_received", async (event: any, ctx: any) => {
       const sessionId = resolveOpenClawSessionId(event, ctx);
       capturePromptFromEvent("message_received", event, sessionId);
+      await recordCoordinationInbound(event, ctx);
     });
     api.on("agent_end", async (event: any, ctx: any) => {
       if (isSubagentLifecycleEvent(event, ctx)) return;
@@ -2226,6 +2461,88 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
       },
     },
     { name: "sage_status", optional: true },
+  );
+}
+
+function registerCoordinationTool(api: PluginApi, controller: CoordinationController | null) {
+  api.registerTool(
+    {
+      name: "sage_coordination",
+      label: "Sage: coordination controller",
+      description:
+        "Persist and advance an OpenClaw-owned Sage behavior plan. Side effects pause until an exact preview digest receives the declared authority.",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("create"), Type.Literal("get"), Type.Literal("list_pending"),
+          Type.Literal("record_chat"), Type.Literal("set_preview"),
+          Type.Literal("approve"), Type.Literal("start"), Type.Literal("complete"),
+          Type.Literal("fail"), Type.Literal("retry"), Type.Literal("recover"),
+        ]),
+        params: Type.Record(Type.String(), Type.Unknown()),
+      }),
+      execute: async (_toolCallId: string, raw: Record<string, unknown>) => {
+        if (!controller) return toToolResult({ error: "coordination_disabled" });
+        const action = String(raw.action || "");
+        const params = (raw.params && typeof raw.params === "object" ? raw.params : {}) as any;
+        try {
+          let result: unknown;
+          switch (action) {
+            case "create":
+              result = await controller.create(params);
+              break;
+            case "get":
+              result = await controller.get(String(params.coordination_id || ""));
+              break;
+            case "list_pending":
+              result = await controller.listPending();
+              break;
+            case "record_chat":
+              result = await controller.recordChatIdentity(
+                String(params.coordination_id || ""), params,
+              );
+              break;
+            case "set_preview":
+              result = await controller.setPreview(
+                String(params.coordination_id || ""), String(params.step_id || ""), params,
+              );
+              break;
+            case "approve":
+              result = await controller.approve(String(params.coordination_id || ""), params);
+              break;
+            case "start":
+              result = await controller.start(
+                String(params.coordination_id || ""), String(params.step_id || ""),
+              );
+              break;
+            case "complete":
+              result = await controller.complete(
+                String(params.coordination_id || ""), String(params.step_id || ""), params,
+              );
+              break;
+            case "fail":
+              result = await controller.fail(
+                String(params.coordination_id || ""), String(params.step_id || ""),
+                String(params.message || "step failed"),
+              );
+              break;
+            case "retry":
+              result = await controller.retry(
+                String(params.coordination_id || ""), String(params.step_id || ""),
+              );
+              break;
+            case "recover":
+              result = await controller.recover(String(params.coordination_id || ""), params);
+              break;
+            default:
+              throw new Error("unsupported_coordination_action");
+          }
+          return toToolResult(result);
+        } catch (error) {
+          return toToolResult({ error: error instanceof Error ? error.message : String(error) });
+        }
+      },
+    },
+    { name: "sage_coordination", optional: true },
   );
 }
 
@@ -2441,4 +2758,5 @@ export const __test = {
   SageSearchDomain,
   SageExecuteDomain,
   enrichErrorMessage,
+  gatherHeartbeatContext,
 };

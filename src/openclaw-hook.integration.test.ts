@@ -324,6 +324,7 @@ test("OpenClaw plugin registers internal and typed runtime hooks", () => {
   assert.ok(typeof hooks["command:new"] === "function");
   assert.ok(typeof hooks["command:stop"] === "function");
   assert.ok(typeof hooks["before_prompt_build"] === "function");
+  assert.ok(typeof hooks["inbound_claim"] === "function");
   assert.ok(typeof hooks["agent_end"] === "function");
   assert.ok(typeof hooks["session_end"] === "function");
 });

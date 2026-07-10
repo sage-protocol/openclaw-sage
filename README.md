@@ -107,10 +107,91 @@ Important options:
 - Hosts with an explicit suggestion rejection UI can call the exported `emitOpenClawHookSuggestionReject({ sessionId })` helper to send `sage suggest feedback reject --source openclaw-hook`.
 - `soulStreamDao` and `soulStreamLibraryId` opt into local soul stream context on governance-relevant turns.
 - `injectionGuardEnabled` enables deterministic prompt-injection scanning for outgoing `sage_execute` mutations.
+- `coordinationControllerEnabled` enables the persistent OpenClaw controller for Sage `behaviorPlan` output. It defaults to `true`.
+- `coordinationStateDir` selects the private card/receipt store (default: `~/.openclaw/sage-coordination`).
+- `coordinationOperatorIds` is the explicit Telegram sender-ID allowlist whose inbound messages may carry operator authority. An empty list means no Telegram message can approve a side effect.
 
 Secrets should use OpenClaw SecretRef providers rather than raw prompt text.
 Declared credentials are `SAGE_IPFS_UPLOAD_TOKEN`, `KEYSTORE_PASSWORD`, and
 `SAGE_DELEGATE_KEYSTORE_PASSWORD`.
+
+### Coordination controller and Telegram replies
+
+Sage selects a capability and returns a portable, machine-readable
+`behaviorPlan`; it does **not** execute the plan. OpenClaw owns the controller
+lifecycle through `sage_coordination`:
+
+```text
+create -> start read/draft step -> complete with evidence
+       -> preserve exact side-effect preview -> Telegram conversation
+       -> digest-bound approval receipt -> resume one checkpoint
+```
+
+The controller persists the coordination card, step state, artifacts, chat
+message identities, raw inbound operator wording, authority receipts,
+verification results, and reward/governance outcomes. `chat`, `private_write`,
+`public_write`, `payment`, and `governance` are always checkpointed, including
+legacy plans that omit annotations. Approvals require all of:
+
+1. an exact preserved preview digest;
+2. an inbound Telegram message identity on the same coordination card;
+3. a sender present in `coordinationOperatorIds` with enough authority; and
+4. OpenClaw's semantic determination that the natural-language reply explicitly
+   confirms that preview.
+
+This is intentionally conversational rather than a keyword command parser.
+Replies may brainstorm or refine the coalition understanding repeatedly. A new
+concrete preview invalidates prior receipts. Forgejo remains only the local
+host/workspace used by an adapter; it is not a Sage command domain.
+
+Reliable same-turn conversation context requires an OpenClaw release that emits
+the awaited `inbound_claim` hook. `message_received` remains a deduplicated
+legacy fallback, but older runtimes may not persist it before prompt building;
+the failure mode is closed (no approval context), never implicit authority.
+
+The controller assumes one OpenClaw gateway is the writer for a state
+directory. Its per-card queue serializes operations inside that process, atomic
+rename protects updates, and create uses an exclusive hard-link commit so two
+processes cannot both create the same card. If a crash leaves a step `running`,
+an allowlisted operator can explicitly recover it using an inbound Telegram
+message identity; checkpointed work then requires a fresh preview approval
+before retry.
+
+Heartbeat discovery now reads watched/unread rooms, recent global/DAO/library
+chat, DAOs, bounties, social follows, marketplace/library signals, RLM outcomes,
+and pending coalition cards. These are read-only inputs for OpenClaw judgment;
+they do not grant mutation authority.
+
+For OpenClaw installations that use an explicit tool allowlist, add the four
+Sage tools without replacing the host's core tools, and allow the conversation
+hooks needed to bind inbound Telegram replies to coordination cards:
+
+```json
+{
+  "tools": {
+    "alsoAllow": [
+      "sage_search",
+      "sage_execute",
+      "sage_status",
+      "sage_coordination"
+    ]
+  },
+  "plugins": {
+    "entries": {
+      "openclaw-sage": {
+        "hooks": {
+          "allowConversationAccess": true
+        }
+      }
+    }
+  }
+}
+```
+
+Use `tools.alsoAllow` for this additive grant. A restrictive `tools.allow`
+replaces the normal OpenClaw tool set and should be used only when that is the
+operator's explicit intent. Without conversation access, the controller stays
+fail-closed: inbound replies cannot authorize or resume checkpointed work.
 
 ### Inferred SKILL.md read feedback (default off)
 

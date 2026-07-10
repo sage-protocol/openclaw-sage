@@ -1,6 +1,12 @@
 {
   "id": "openclaw-sage",
   "enabledByDefault": true,
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["sage_search", "sage_execute", "sage_status", "sage_coordination"]
+  },
   "secretRefs": {
     "SAGE_IPFS_UPLOAD_TOKEN": {
       "description": "Bearer token for Sage Worker API authentication",
@@ -125,6 +131,19 @@
       "heartbeatContextMaxChars": {
         "type": "number",
         "description": "Max characters of context to gather from memory/RLM for skill search (default: 4000, min: 500, max: 16000)"
+      },
+      "coordinationControllerEnabled": {
+        "type": "boolean",
+        "description": "Enable the persistent OpenClaw behavior-plan controller (default: true)"
+      },
+      "coordinationStateDir": {
+        "type": "string",
+        "description": "Directory for private coordination cards and authority receipts (default: ~/.openclaw/sage-coordination)"
+      },
+      "coordinationOperatorIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Telegram sender IDs allowed to grant operator authority to an exact preview digest"
       }
     }
   }

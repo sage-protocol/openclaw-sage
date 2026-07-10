@@ -9,6 +9,41 @@ import { McpBridge } from "./mcp-bridge.js";
 import plugin from "./index.js";
 import { __test } from "./index.js";
 
+test("plugin manifest declares every registered agent tool contract", () => {
+  const manifest = JSON.parse(readFileSync(resolve(new URL("..", import.meta.url).pathname, "openclaw.plugin.json"), "utf8"));
+  assert.deepEqual(
+    [...manifest.contracts.tools].sort(),
+    ["sage_coordination", "sage_execute", "sage_search", "sage_status"],
+  );
+});
+
+test("plugin cold manifest activates mixed tools, hooks, and services at startup", () => {
+  const packageRoot = resolve(new URL("..", import.meta.url).pathname);
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "openclaw.plugin.json"), "utf8"));
+  assert.equal(manifest.activation?.onStartup, true);
+  const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  assert.deepEqual(packageJson.openclaw?.runtimeExtensions, ["./dist/index.js"]);
+});
+
+test("cold sage_coordination contract remains registered when controller execution is disabled", async () => {
+  let coordinationTool: any;
+  plugin.register({
+    id: "test",
+    name: "test",
+    pluginConfig: { coordinationControllerEnabled: false },
+    logger: { info() {}, warn() {}, error() {} },
+    registerTool(tool: any) {
+      if (tool?.name === "sage_coordination") coordinationTool = tool;
+    },
+    registerService() {},
+    on() {},
+    registerHook() {},
+  } as any);
+  assert.ok(coordinationTool);
+  const result = await coordinationTool.execute("disabled-test", { action: "list_pending", params: {} });
+  assert.equal(result.details?.error, "coordination_disabled");
+});
+
 function candidateSageDebugBinDirs(): string[] {
   const here = resolve(new URL("..", import.meta.url).pathname);
   const candidates = [
