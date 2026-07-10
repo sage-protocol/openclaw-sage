@@ -811,7 +811,29 @@ function extractEventTokenCount(event: any, phase: "input" | "output"): string {
   return String(value);
 }
 
-const SageDomain = Type.Union(
+// Search accepts the read-only "marketplace" discovery domain; execute does
+// not — marketplace has no write actions in this surface.
+const SageSearchDomain = Type.Union(
+  [
+    Type.Literal("prompts"),
+    Type.Literal("skills"),
+    Type.Literal("behaviors"),
+    Type.Literal("marketplace"),
+    Type.Literal("builder"),
+    Type.Literal("governance"),
+    Type.Literal("chat"),
+    Type.Literal("social"),
+    Type.Literal("rlm"),
+    Type.Literal("library_sync"),
+    Type.Literal("security"),
+    Type.Literal("meta"),
+    Type.Literal("help"),
+    Type.Literal("external"),
+  ],
+  { description: "Sage domain namespace (search; marketplace is read-only discovery)" },
+);
+
+const SageExecuteDomain = Type.Union(
   [
     Type.Literal("prompts"),
     Type.Literal("skills"),
@@ -827,7 +849,7 @@ const SageDomain = Type.Union(
     Type.Literal("help"),
     Type.Literal("external"),
   ],
-  { description: "Sage domain namespace" },
+  { description: "Sage domain namespace (execute; marketplace is search-only)" },
 );
 
 type SageCodeModeRequest = {
@@ -2224,7 +2246,7 @@ function registerCodeModeTools(
       label: "Sage: search",
       description: "Sage code-mode search/discovery (domain/action routing)",
       parameters: Type.Object({
-        domain: SageDomain,
+        domain: SageSearchDomain,
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
@@ -2263,7 +2285,7 @@ function registerCodeModeTools(
       label: "Sage: execute",
       description: "Sage code-mode execute/mutations (domain/action routing)",
       parameters: Type.Object({
-        domain: SageDomain,
+        domain: SageExecuteDomain,
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
@@ -2272,6 +2294,12 @@ function registerCodeModeTools(
         const action = String(params.action ?? "");
         const skillKey =
           domain === "skills" && action === "use" ? extractSkillKeyFromExecuteParams(params) : "";
+
+        if (domain === "marketplace") {
+          return toToolResult({
+            error: "Domain 'marketplace' is discovery-only. Use sage_search instead.",
+          });
+        }
 
         try {
           const p =
@@ -2410,5 +2438,7 @@ export const __test = {
   soulStreamApplies,
   mcpSchemaToTypebox,
   jsonSchemaToTypebox,
+  SageSearchDomain,
+  SageExecuteDomain,
   enrichErrorMessage,
 };

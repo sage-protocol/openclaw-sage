@@ -263,6 +263,26 @@ test("jsonSchemaToTypebox handles single enum value as literal", () => {
   assert.equal(result.const, "only_value");
 });
 
+test("SageSearchDomain union accepts the marketplace domain", () => {
+  const schema = __test.SageSearchDomain as any;
+  assert.ok(Array.isArray(schema.anyOf), "SageSearchDomain should compile to a union (anyOf)");
+  const literals = schema.anyOf.map((v: any) => v.const);
+  assert.ok(literals.includes("marketplace"), "search domain union should include marketplace");
+  assert.ok(literals.includes("skills"), "search domain union should still include skills");
+  assert.ok(literals.includes("builder"), "search domain union should still include builder");
+});
+
+test("SageExecuteDomain union rejects the marketplace domain", () => {
+  const schema = __test.SageExecuteDomain as any;
+  assert.ok(Array.isArray(schema.anyOf), "SageExecuteDomain should compile to a union (anyOf)");
+  const literals = schema.anyOf.map((v: any) => v.const);
+  assert.ok(
+    !literals.includes("marketplace"),
+    "execute domain union must NOT include marketplace (read-only slice)",
+  );
+  assert.ok(literals.includes("skills"), "execute domain union should still include skills");
+});
+
 // ── P2: Error enrichment ─────────────────────────────────────────────
 
 test("enrichErrorMessage adds wallet hint for wallet errors", () => {
