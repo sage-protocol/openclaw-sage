@@ -298,16 +298,17 @@ test("jsonSchemaToTypebox handles single enum value as literal", () => {
   assert.equal(result.const, "only_value");
 });
 
-test("SageSearchDomain union accepts the marketplace domain", () => {
+test("SageSearchDomain union accepts read-only marketplace and lineage domains", () => {
   const schema = __test.SageSearchDomain as any;
   assert.ok(Array.isArray(schema.anyOf), "SageSearchDomain should compile to a union (anyOf)");
   const literals = schema.anyOf.map((v: any) => v.const);
   assert.ok(literals.includes("marketplace"), "search domain union should include marketplace");
+  assert.ok(literals.includes("lineage"), "search domain union should include lineage");
   assert.ok(literals.includes("skills"), "search domain union should still include skills");
   assert.ok(literals.includes("builder"), "search domain union should still include builder");
 });
 
-test("SageExecuteDomain union rejects the marketplace domain", () => {
+test("SageExecuteDomain union rejects read-only marketplace and lineage domains", () => {
   const schema = __test.SageExecuteDomain as any;
   assert.ok(Array.isArray(schema.anyOf), "SageExecuteDomain should compile to a union (anyOf)");
   const literals = schema.anyOf.map((v: any) => v.const);
@@ -315,7 +316,20 @@ test("SageExecuteDomain union rejects the marketplace domain", () => {
     !literals.includes("marketplace"),
     "execute domain union must NOT include marketplace (read-only slice)",
   );
+  assert.ok(
+    !literals.includes("lineage"),
+    "execute domain union must NOT include lineage (read-only slice)",
+  );
   assert.ok(literals.includes("skills"), "execute domain union should still include skills");
+});
+
+test("runtime guard rejects schema-bypassed lineage execute requests", () => {
+  assert.equal(
+    __test.discoveryOnlyDomainError("lineage"),
+    "Domain 'lineage' is discovery-only. Use sage_search instead.",
+  );
+  assert.equal(__test.discoveryOnlyDomainError("marketplace"), "Domain 'marketplace' is discovery-only. Use sage_search instead.");
+  assert.equal(__test.discoveryOnlyDomainError("skills"), null);
 });
 
 // ── P2: Error enrichment ─────────────────────────────────────────────

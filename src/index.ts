@@ -971,6 +971,7 @@ const SageSearchDomain = Type.Union(
     Type.Literal("skills"),
     Type.Literal("behaviors"),
     Type.Literal("marketplace"),
+    Type.Literal("lineage"),
     Type.Literal("builder"),
     Type.Literal("governance"),
     Type.Literal("chat"),
@@ -982,7 +983,7 @@ const SageSearchDomain = Type.Union(
     Type.Literal("help"),
     Type.Literal("external"),
   ],
-  { description: "Sage domain namespace (search; marketplace is read-only discovery)" },
+  { description: "Sage domain namespace (search; marketplace and lineage are read-only discovery)" },
 );
 
 const SageExecuteDomain = Type.Union(
@@ -1001,7 +1002,7 @@ const SageExecuteDomain = Type.Union(
     Type.Literal("help"),
     Type.Literal("external"),
   ],
-  { description: "Sage domain namespace (execute; marketplace is search-only)" },
+  { description: "Sage domain namespace (execute; marketplace and lineage are search-only)" },
 );
 
 type SageCodeModeRequest = {
@@ -1009,6 +1010,12 @@ type SageCodeModeRequest = {
   action: string;
   params?: Record<string, unknown>;
 };
+
+function discoveryOnlyDomainError(domain: string): string | null {
+  return domain === "marketplace" || domain === "lineage"
+    ? `Domain '${domain}' is discovery-only. Use sage_search instead.`
+    : null;
+}
 
 /**
  * Convert a single MCP JSON Schema property into a TypeBox type.
@@ -2660,9 +2667,10 @@ function registerCodeModeTools(
         const skillKey =
           domain === "skills" && action === "use" ? extractSkillKeyFromExecuteParams(params) : "";
 
-        if (domain === "marketplace") {
+        const discoveryOnlyError = discoveryOnlyDomainError(domain);
+        if (discoveryOnlyError) {
           return toToolResult({
-            error: "Domain 'marketplace' is discovery-only. Use sage_search instead.",
+            error: discoveryOnlyError,
           });
         }
 
@@ -2805,6 +2813,7 @@ export const __test = {
   jsonSchemaToTypebox,
   SageSearchDomain,
   SageExecuteDomain,
+  discoveryOnlyDomainError,
   enrichErrorMessage,
   gatherHeartbeatContext,
 };
