@@ -624,7 +624,7 @@ test("OpenClaw plugin registers before_prompt_build hook and returns context blo
   );
 });
 
-test("formatSkillSuggestions formats stable markdown", () => {
+test("formatSkillSuggestions formats load-first ranking shortlist", () => {
   const out = __test.formatSkillSuggestions(
     [
       {
@@ -633,6 +633,13 @@ test("formatSkillSuggestions formats stable markdown", () => {
         description: "Recon, scanning, API testing",
         source: "installed",
         mcpServers: ["zap"],
+        mustLoadFull: true,
+        loadCommands: {
+          native: "/skill:Bug Bounty or read SKILL.md",
+          cli: "sage library inspect skill get bug-bounty",
+          mcp: "get_skill or use_skill (returns body; does not run steps)",
+        },
+        realpaths: ["/home/user/.agents/skills/bug-bounty/SKILL.md"],
       },
       { key: "", name: "skip" },
     ],
@@ -640,11 +647,60 @@ test("formatSkillSuggestions formats stable markdown", () => {
   );
 
   assert.ok(out.includes("## Suggested Skills"));
-  assert.ok(out.includes("`sage_execute`"));
+  assert.ok(out.includes("RANKING SHORTLIST"));
+  assert.ok(out.includes("Load full procedure before freestyle"));
+  assert.ok(out.includes("native path: read `/home/user/.agents/skills/bug-bounty/SKILL.md`"));
+  assert.ok(out.includes("sage library inspect skill get bug-bounty"));
   assert.ok(out.includes('"domain": "skills"'));
-  assert.ok(out.includes('"action": "use"'));
+  assert.ok(out.includes('"action": "use"') || out.includes('"action": "get"'));
   assert.ok(out.includes('"key": "bug-bounty"'));
   assert.ok(out.includes("requires: zap"));
+});
+
+test("formatSkillSuggestions injects high-score skill body", () => {
+  const out = __test.formatSkillSuggestions(
+    [
+      {
+        key: "code-audit",
+        name: "code-audit",
+        mustLoadFull: true,
+        score: 90,
+        content: "# Code Audit\n\nStep 1: inventory\nStep 2: review",
+      },
+    ],
+    1,
+  );
+  assert.ok(out.includes("--- Full skill procedure: code-audit ---"));
+  assert.ok(out.includes("Step 1: inventory"));
+});
+
+test("parseSkillSuggestionResults preserves loadCommands and mustLoadFull", () => {
+  const parsed = __test.parseSkillSuggestionResults(
+    JSON.stringify({
+      results: [
+        {
+          key: "code-audit",
+          name: "code-audit",
+          type: "skill",
+          entryKind: "skill",
+          description: "Audit code",
+          mustLoadFull: true,
+          loadCommands: {
+            native: "/skill:code-audit",
+            cli: "sage library inspect skill get code-audit",
+          },
+          score: 80,
+          mcp_servers: ["semgrep"],
+        },
+      ],
+    }),
+  );
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].key, "code-audit");
+  assert.equal(parsed[0].mustLoadFull, true);
+  assert.equal(parsed[0].loadCommands?.cli, "sage library inspect skill get code-audit");
+  assert.deepEqual(parsed[0].mcpServers, ["semgrep"]);
+  assert.equal(parsed[0].score, 80);
 });
 
 test("OpenClaw injectionGuard blocks dangerous execute payload (optional e2e)", async () => {

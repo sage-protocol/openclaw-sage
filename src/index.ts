@@ -157,6 +157,13 @@ function formatSecuritySummary(scan: SecurityScanResult): string {
   return parts.join(" ");
 }
 
+type SkillLoadCommands = {
+  native?: string;
+  cli?: string;
+  mcp?: string;
+  fullSuggest?: string;
+};
+
 type SkillSearchResult = {
   key?: string;
   name?: string;
@@ -166,7 +173,21 @@ type SkillSearchResult = {
   mcpServers?: string[];
   type?: string;
   entryKind?: string;
+  /** Ranking shortlist is not skill execution; adapters should load full procedure. */
+  mustLoadFull?: boolean;
+  loadCommands?: SkillLoadCommands;
+  /** Full or distilled body when CLI emission includes it. */
+  content?: string;
+  contentOmitted?: boolean;
+  score?: number;
+  /** Verified exposed SKILL.md realpaths from `sage skill status` (load enforcement). */
+  realpaths?: string[];
 };
+
+/** Cap for auto-injected skill body into suggestion context (chars). */
+const SUGGESTED_SKILL_BODY_MAX_CHARS = 8_000;
+/** Inject full body when score is at least this (or mustLoadFull is true). */
+const AUTO_INJECT_BODY_MIN_SCORE = 50;
 
 // Reject leading hyphen so a hostile key cannot shadow a CLI flag in argv
 // (`--source`, `-rm`, `-` etc.). 128 chars matches the daemon-side bound.
@@ -226,13 +247,49 @@ function parseSkillSuggestionResults(raw: unknown): SkillSearchResult[] {
       type: typeof record.type === "string" ? record.type : undefined,
       entryKind: typeof record.entryKind === "string" ? record.entryKind : undefined,
     };
-    if (Array.isArray(record.mcpServers)) {
-      result.mcpServers = record.mcpServers.filter((s): s is string => typeof s === "string");
+    const mcpRaw = Array.isArray(record.mcpServers)
+      ? record.mcpServers
+      : Array.isArray(record.mcp_servers)
+        ? record.mcp_servers
+        : undefined;
+    if (mcpRaw) {
+      result.mcpServers = mcpRaw.filter((s): s is string => typeof s === "string");
+    }
+    if (typeof record.mustLoadFull === "boolean") {
+      result.mustLoadFull = record.mustLoadFull;
+    } else if (typeof record.must_load_full === "boolean") {
+      result.mustLoadFull = record.must_load_full;
+    }
+    const loadCmds = record.loadCommands ?? record.load_commands;
+    if (loadCmds && typeof loadCmds === "object") {
+      const lc = loadCmds as Record<string, unknown>;
+      result.loadCommands = {
+        native: typeof lc.native === "string" ? lc.native : undefined,
+        cli: typeof lc.cli === "string" ? lc.cli : undefined,
+        mcp: typeof lc.mcp === "string" ? lc.mcp : undefined,
+        fullSuggest: typeof lc.fullSuggest === "string" ? lc.fullSuggest : undefined,
+      };
+    }
+    if (typeof record.content === "string" && record.content.trim()) {
+      result.content = record.content;
+    }
+    if (typeof record.contentOmitted === "boolean") {
+      result.contentOmitted = record.contentOmitted;
+    }
+    if (typeof record.score === "number" && Number.isFinite(record.score)) {
+      result.score = record.score;
     }
     skillResults.push(result);
   }
 
   return skillResults;
+}
+
+function shouldInjectSkillBody(result: SkillSearchResult): boolean {
+  if (typeof result.content !== "string" || !result.content.trim()) return false;
+  if (result.mustLoadFull === true) return true;
+  if (typeof result.score === "number" && result.score >= AUTO_INJECT_BODY_MIN_SCORE) return true;
+  return false;
 }
 
 function formatSkillSuggestions(results: SkillSearchResult[], limit: number): string {
@@ -244,8 +301,13 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
   const lines: string[] = [];
   lines.push("## Suggested Skills");
   lines.push("");
+  lines.push(
+    "RANKING SHORTLIST — not skill execution. Load the full procedure first, then freestyle tools under its constraints.",
+  );
+  lines.push("");
   for (const r of items) {
     const key = r.key!.trim();
+    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : key;
     const desc = typeof r.description === "string" ? r.description.trim() : "";
     const origin =
       typeof r.library === "string" && r.library.trim() ? ` (from ${r.library.trim()})` : "";
@@ -253,11 +315,54 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
       Array.isArray(r.mcpServers) && r.mcpServers.length
         ? ` — requires: ${r.mcpServers.join(", ")}`
         : "";
+    const mustLoad = r.mustLoadFull !== false;
+
+    lines.push(`### \`${key}\`${origin}${desc ? `: ${desc}` : ""}${servers}`);
+    lines.push("");
+    if (mustLoad) {
+      lines.push("**Load full procedure before freestyle** (required):");
+    } else {
+      lines.push("**Load paths** (body may already be included):");
+    }
+    const lc = r.loadCommands;
+    if (Array.isArray(r.realpaths) && r.realpaths.length) {
+      for (const p of r.realpaths.slice(0, 3)) {
+        lines.push(`- native path: read \`${p}\``);
+      }
+    }
+    if (lc?.native) lines.push(`- native: ${lc.native}`);
+    else lines.push(`- native: \`/skill:${name}\` or read SKILL.md under harness skills dir`);
+    if (lc?.cli) lines.push(`- cli: \`${lc.cli}\``);
+    else lines.push(`- cli: \`sage library inspect skill get ${key}\``);
+    if (lc?.mcp) lines.push(`- mcp: ${lc.mcp}`);
+    else {
+      lines.push(
+        `- mcp body: \`sage_execute\` { "domain": "skills", "action": "get", "params": { "key": "${key}" } } (returns body; does not run steps)`,
+      );
+    }
     lines.push(
-      `- \`sage_execute\` { "domain": "skills", "action": "use", "params": { "key": "${key}" } }${origin}${desc ? `: ${desc}` : ""}${servers}`,
+      `- optional activate: \`sage_execute\` { "domain": "skills", "action": "use", "params": { "key": "${key}" } } (body/activate only — not a skill runner)`,
     );
+    if (lc?.fullSuggest) lines.push(`- full ranking body: \`${lc.fullSuggest}\``);
+    lines.push("");
+
+    if (shouldInjectSkillBody(r) && r.content) {
+      const body =
+        r.content.length > SUGGESTED_SKILL_BODY_MAX_CHARS
+          ? `${r.content.slice(0, SUGGESTED_SKILL_BODY_MAX_CHARS)}\n... (truncated; load full via paths above)`
+          : r.content;
+      lines.push(`--- Full skill procedure: ${key} ---`);
+      lines.push(body);
+      lines.push(`--- End: ${key} ---`);
+      lines.push("");
+    } else if (r.contentOmitted || mustLoad) {
+      lines.push(
+        `_Body omitted from ranking shortlist — load via a path above before treating the skill as used._`,
+      );
+      lines.push("");
+    }
   }
-  return lines.join("\n");
+  return lines.join("\n").trimEnd();
 }
 
 function extractSkillKeyFromExecuteParams(params: Record<string, unknown>): string {
@@ -1581,7 +1686,8 @@ const plugin = {
         if (!resolved) continue;
         const { result, key, paths } = resolved;
         correlatedKeys.set(key, new Set(paths));
-        displayResults.push(result);
+        // Attach verified realpaths so formatSkillSuggestions can enforce load paths.
+        displayResults.push({ ...result, realpaths: paths });
       }
 
       state.perCorrelation.set(correlationSession, {
@@ -1720,13 +1826,20 @@ const plugin = {
       return "";
     };
 
+    /**
+     * Outcome only when there is a real terminal success signal.
+     * Mere SKILL.md read is not "passed" — that poisons the flywheel.
+     * Returns null to skip outcome emission (use feedback still records contact).
+     * agent_end success takes precedence over nearby tool-error noise.
+     */
     const outcomeStatusForEntry = (
       state: SkillUseHookSessionState,
       entry: UsedSkillReadEntry,
-    ): "passed" | "failed" => {
+    ): "passed" | "failed" | null => {
       if (state.agentEndSuccess === false) return "failed";
-      if (entry.nearbyToolError && state.agentEndSuccess === undefined) return "failed";
-      return "passed";
+      if (state.agentEndSuccess === true) return "passed";
+      if (entry.nearbyToolError) return "failed";
+      return null;
     };
 
     const flushTerminal = async (
@@ -1824,6 +1937,8 @@ const plugin = {
         for (const { skillKey, queryPreview, status } of usedSkillSnapshot) {
           if (!isValidSkillKey(skillKey)) continue;
           if (state.reportedFor.has(skillKey)) continue;
+          // No real terminal success signal → do not invent passed from a SKILL.md read.
+          if (status == null) continue;
 
           const args = [
             "suggest",
@@ -2800,6 +2915,7 @@ export const __test = {
   isSubagentSessionKey,
   extractSkillKeyFromExecuteParams,
   formatSkillSuggestions,
+  shouldInjectSkillBody,
   resolveOpenClawSessionId,
   normalizeOpenClawToolName,
   extractPathsForTool,

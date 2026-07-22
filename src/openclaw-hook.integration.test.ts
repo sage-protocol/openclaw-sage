@@ -815,16 +815,13 @@ test("OpenClaw SKILL.md read detection emits one feedback-use process per correl
       ]);
       assert.deepEqual(useCalls[0].args.slice(-2), ["--session", "base-session__turn_1"]);
 
-      assert.equal(outcomeCalls.length, 2);
-      for (const call of outcomeCalls) {
-        assert.ok(call.args.includes("--source"));
-        assert.ok(call.args.includes("openclaw-hook"));
-        assert.ok(call.args.includes("--session"));
-        assert.ok(call.args.includes("base-session"));
-        assert.ok(call.args.includes("--query-preview"));
-        assert.ok(call.args.includes("--status"));
-        assert.ok(call.args.includes("passed"));
-      }
+      // command:stop without agent_end success is not a real success signal —
+      // use is recorded (skill contact), but outcome is not auto-passed.
+      assert.equal(
+        outcomeCalls.length,
+        0,
+        "mere SKILL.md read + stop must not invent passed outcomes",
+      );
     },
     { toolCallHookEnabled: true },
   );
@@ -1022,7 +1019,12 @@ test("OpenClaw SKILL.md read credits the same skill across multiple correlations
         useCalls.map(({ args }) => args.at(-1)).sort(),
         ["base-session__turn_1", "base-session__turn_2"],
       );
-      assert.equal(outcomeCalls.length, 1, "skill_execution outcome is per used skill/base session");
+      // No agent_end success → no invented passed outcome (use still records contact).
+      assert.equal(
+        outcomeCalls.length,
+        0,
+        "SKILL.md read without agent_end success must not invent outcomes",
+      );
     },
     { toolCallHookEnabled: true },
   );
@@ -1063,7 +1065,7 @@ test("OpenClaw SKILL.md self-edit suppression removes only the edited recent rea
         { toolName: "Edit", params: { path: join(skillA, "SKILL.md") } },
         { sessionKey: "base-session" },
       );
-      await hooks["command:stop"]({ sessionKey: "base-session", response: "done" });
+      await hooks["agent_end"]({ success: true, response: "done" }, { sessionKey: "base-session" });
 
       const feedbackCalls = readFakeSageLog(logPath).filter(
         ({ args }) => args[0] === "suggest" && args[1] === "feedback",
@@ -1075,6 +1077,7 @@ test("OpenClaw SKILL.md self-edit suppression removes only the edited recent rea
       const outcomeKeys = feedbackCalls
         .filter(({ args }) => args[2] === "outcome")
         .map(({ args }) => args[3]);
+      // Only skill-b remains after self-edit suppression; outcome needs agent_end success.
       assert.deepEqual(outcomeKeys, ["skill-b"]);
     },
     { toolCallHookEnabled: true },
