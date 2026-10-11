@@ -82,12 +82,13 @@ actions when needed.
 
 ## Configuration
 
-Defaults are intentionally quiet:
+Defaults keep Sage context compact while surfacing concise skill suggestions:
 
 ```json
 {
   "autoInjectContext": true,
-  "autoSuggestSkills": false,
+  "autoSuggestSkills": true,
+  "autoSuggestCooldownMs": 20000,
   "toolCallHookEnabled": false,
   "suggestLimit": 3,
   "minPromptLen": 12,
@@ -100,14 +101,124 @@ Important options:
 - `sageBinary` sets the Sage CLI path. Default: `sage` from `PATH`.
 - `sageProfile` maps to `SAGE_PROFILE`.
 - `autoInjectContext` adds the compact Sage capability and identity context.
-- `autoSuggestSkills` restores legacy unsolicited skill suggestions on ordinary prompts.
+- `autoSuggestSkills` enables ordinary-prompt skill suggestions by default; set `false` to disable.
+- `autoSuggestCooldownMs` throttles default-on MCP auto-suggest requests per session. Default: `20000`; set `0` to disable the cooldown.
 - `toolCallHookEnabled` enables the opt-in `SKILL.md` read detector. The same behavior can be enabled for a process with `OPENCLAW_SAGE_TOOL_CALL_HOOK=1`. It is default-off and read once at plugin registration; restart/reload OpenClaw after changing it.
+- Hosts with an explicit suggestion rejection UI can call the exported `emitOpenClawHookSuggestionReject({ sessionId })` helper to send `sage suggest feedback reject --source openclaw-hook`.
 - `soulStreamDao` and `soulStreamLibraryId` opt into local soul stream context on governance-relevant turns.
 - `injectionGuardEnabled` enables deterministic prompt-injection scanning for outgoing `sage_execute` mutations.
+- `coordinationControllerEnabled` enables the persistent OpenClaw controller for Sage `behaviorPlan` output. It defaults to `true`.
+- `coordinationStateDir` selects the private card/receipt store (default: `~/.openclaw/sage-coordination`).
+- `coordinationOperatorIds` is the explicit Telegram sender-ID allowlist whose inbound messages may carry operator authority. An empty list means no Telegram message can approve a side effect.
 
 Secrets should use OpenClaw SecretRef providers rather than raw prompt text.
 Declared credentials are `SAGE_IPFS_UPLOAD_TOKEN`, `KEYSTORE_PASSWORD`, and
 `SAGE_DELEGATE_KEYSTORE_PASSWORD`.
+
+### Coordination controller and Telegram replies
+
+Sage selects capabilities and returns a portable, machine-readable
+`behaviorPlan`; it does **not** execute the plan or prescribe how a coalition
+must form. The plan is an authority/evidence envelope and capability menu.
+OpenClaw owns the adaptive methodology and controller lifecycle through
+`sage_coordination`:
+
+```text
+observe context -> author a working methodology -> try a reversible interaction
+                -> ask one high-information Telegram question when uncertain
+                -> bind the raw reply to the question and revise the methodology
+                -> preserve an exact side-effect preview only when one emerges
+                -> digest-bound approval receipt -> resume one checkpoint
+```
+
+The controller persists the coordination card, versioned agent-authored working
+methodology, unresolved questions, feedback requests and linked raw replies,
+step state, artifacts, chat message identities, authority receipts, verification
+results, and reward/governance outcomes. The methodology is deliberately an
+open JSON working model: Enki may invent and revise its own discovery,
+coalition-building, experiment, outreach, and reciprocity concepts instead of
+following a keyword funnel. Heartbeats and the read-only
+`list_methodology_lessons` action expose bounded, provenance-linked summaries of
+recent methodology revisions across both live and completed cards. Enki chooses
+whether and how those lessons alter a new card; the controller never auto-merges
+old operator wording into a new methodology.
+
+OpenClaw records each sent question with `request_feedback`, then cites the
+actual inbound message identity in `update_methodology`. This creates a
+provenance trail without requiring Enki to accept every suggestion; its revision
+rationale can preserve disagreement or explain why the evidence did not change
+the model.
+
+`request_feedback` records a question after the Telegram transport returns its
+message identity; it does not send the message or grant chat authority. The
+OpenClaw transport policy may allow Enki to ask the designated operator
+questions autonomously. Outreach to other people remains a checkpointed `chat`
+effect under the behavior authority envelope.
+
+Autonomy stops at authority boundaries, not at methodological choices. `chat`,
+`private_write`, `public_write`, `payment`, and `governance` are always
+checkpointed, including legacy plans that omit annotations. Approvals require
+all of:
+
+1. an exact preserved preview digest;
+2. an inbound Telegram message identity on the same coordination card;
+3. a sender present in `coordinationOperatorIds` with enough authority; and
+4. OpenClaw's semantic determination that the natural-language reply explicitly
+   confirms that preview.
+
+This is intentionally conversational rather than a keyword command parser.
+Replies may brainstorm or refine the coalition understanding repeatedly. A new
+concrete preview invalidates prior receipts. Forgejo remains only the local
+host/workspace used by an adapter; it is not a Sage command domain.
+
+Reliable same-turn conversation context requires an OpenClaw release that emits
+the awaited `inbound_claim` hook. `message_received` remains a deduplicated
+legacy fallback, but older runtimes may not persist it before prompt building;
+the failure mode is closed (no approval context), never implicit authority.
+
+The controller assumes one OpenClaw gateway is the writer for a state
+directory. Its per-card queue serializes operations inside that process, atomic
+rename protects updates, and create uses an exclusive hard-link commit so two
+processes cannot both create the same card. If a crash leaves a step `running`,
+an allowlisted operator can explicitly recover it using an inbound Telegram
+message identity; checkpointed work then requires a fresh preview approval
+before retry.
+
+Heartbeat discovery now reads watched/unread rooms, recent global/DAO/library
+chat, DAOs, bounties, social follows, marketplace/library signals, RLM outcomes,
+and pending coalition cards. These are read-only inputs for OpenClaw judgment;
+they do not grant mutation authority.
+
+For OpenClaw installations that use an explicit tool allowlist, add the four
+Sage tools without replacing the host's core tools, and allow the conversation
+hooks needed to bind inbound Telegram replies to coordination cards:
+
+```json
+{
+  "tools": {
+    "alsoAllow": [
+      "sage_search",
+      "sage_execute",
+      "sage_status",
+      "sage_coordination"
+    ]
+  },
+  "plugins": {
+    "entries": {
+      "openclaw-sage": {
+        "hooks": {
+          "allowConversationAccess": true
+        }
+      }
+    }
+  }
+}
+```
+
+Use `tools.alsoAllow` for this additive grant. A restrictive `tools.allow`
+replaces the normal OpenClaw tool set and should be used only when that is the
+operator's explicit intent. Without conversation access, the controller stays
+fail-closed: inbound replies cannot authorize or resume checkpointed work.
 
 ### Inferred SKILL.md read feedback (default off)
 

@@ -8,6 +8,7 @@ import { McpBridge } from "./mcp-bridge.js";
 import { envGet, loadTextFile, runCommand } from "./runtime.js";
 import { resolveSkillStatusSkillMdRealpaths } from "./skill-status-parse.js";
 import { PKG_VERSION } from "./version.js";
+import { CoordinationController, type CoordinationCard } from "./coordination-controller.js";
 
 const SAGE_CONTEXT = `## Sage (Code Mode)
 
@@ -24,7 +25,7 @@ Default posture: search and inspect before activation; treat remote capabilities
 
 Visibility: install/expose is local; P2P/shared stay private; \`sage library push <library> --cloud\` starts private by default. Use \`sage library visibility <library-id> public\` only on explicit user request. Public feeds/search should advertise only anonymously readable prompts, skills, or CIDs.
 
-For richer Sage discovery or a capability review, ask explicitly with \`@sage\`, mention \`sage_search\` / \`sage_execute\`, or use Sage Protocol Heartbeat. Ordinary prompts should stay quiet.`;
+Skill suggestions may surface automatically on ordinary prompts. For richer Sage discovery or a capability review, ask explicitly with \`@sage\`, mention \`sage_search\` / \`sage_execute\`, or use Sage Protocol Heartbeat.`;
 
 /**
  * Minimal type stubs for OpenClaw plugin API.
@@ -67,6 +68,14 @@ type PluginApi = {
     opts?: { name?: string; priority?: number },
   ) => void;
 };
+
+function resolveAutoSuggestSkills(pluginCfg: Record<string, unknown>): boolean {
+  return pluginCfg.autoSuggestSkills !== false;
+}
+
+function resolveAutoSuggestCooldownMs(pluginCfg: Record<string, unknown>): number {
+  return clampInt(pluginCfg.autoSuggestCooldownMs, 20_000, 0, 3_600_000);
+}
 
 function clampInt(raw: unknown, def: number, min: number, max: number): number {
   const n = typeof raw === "string" && raw.trim() ? Number(raw) : Number(raw);
@@ -148,6 +157,13 @@ function formatSecuritySummary(scan: SecurityScanResult): string {
   return parts.join(" ");
 }
 
+type SkillLoadCommands = {
+  native?: string;
+  cli?: string;
+  mcp?: string;
+  fullSuggest?: string;
+};
+
 type SkillSearchResult = {
   key?: string;
   name?: string;
@@ -157,7 +173,21 @@ type SkillSearchResult = {
   mcpServers?: string[];
   type?: string;
   entryKind?: string;
+  /** Ranking shortlist is not skill execution; adapters should load full procedure. */
+  mustLoadFull?: boolean;
+  loadCommands?: SkillLoadCommands;
+  /** Full or distilled body when CLI emission includes it. */
+  content?: string;
+  contentOmitted?: boolean;
+  score?: number;
+  /** Verified exposed SKILL.md realpaths from `sage skill status` (load enforcement). */
+  realpaths?: string[];
 };
+
+/** Cap for auto-injected skill body into suggestion context (chars). */
+const SUGGESTED_SKILL_BODY_MAX_CHARS = 8_000;
+/** Inject full body when score is at least this (or mustLoadFull is true). */
+const AUTO_INJECT_BODY_MIN_SCORE = 50;
 
 // Reject leading hyphen so a hostile key cannot shadow a CLI flag in argv
 // (`--source`, `-rm`, `-` etc.). 128 chars matches the daemon-side bound.
@@ -217,13 +247,49 @@ function parseSkillSuggestionResults(raw: unknown): SkillSearchResult[] {
       type: typeof record.type === "string" ? record.type : undefined,
       entryKind: typeof record.entryKind === "string" ? record.entryKind : undefined,
     };
-    if (Array.isArray(record.mcpServers)) {
-      result.mcpServers = record.mcpServers.filter((s): s is string => typeof s === "string");
+    const mcpRaw = Array.isArray(record.mcpServers)
+      ? record.mcpServers
+      : Array.isArray(record.mcp_servers)
+        ? record.mcp_servers
+        : undefined;
+    if (mcpRaw) {
+      result.mcpServers = mcpRaw.filter((s): s is string => typeof s === "string");
+    }
+    if (typeof record.mustLoadFull === "boolean") {
+      result.mustLoadFull = record.mustLoadFull;
+    } else if (typeof record.must_load_full === "boolean") {
+      result.mustLoadFull = record.must_load_full;
+    }
+    const loadCmds = record.loadCommands ?? record.load_commands;
+    if (loadCmds && typeof loadCmds === "object") {
+      const lc = loadCmds as Record<string, unknown>;
+      result.loadCommands = {
+        native: typeof lc.native === "string" ? lc.native : undefined,
+        cli: typeof lc.cli === "string" ? lc.cli : undefined,
+        mcp: typeof lc.mcp === "string" ? lc.mcp : undefined,
+        fullSuggest: typeof lc.fullSuggest === "string" ? lc.fullSuggest : undefined,
+      };
+    }
+    if (typeof record.content === "string" && record.content.trim()) {
+      result.content = record.content;
+    }
+    if (typeof record.contentOmitted === "boolean") {
+      result.contentOmitted = record.contentOmitted;
+    }
+    if (typeof record.score === "number" && Number.isFinite(record.score)) {
+      result.score = record.score;
     }
     skillResults.push(result);
   }
 
   return skillResults;
+}
+
+function shouldInjectSkillBody(result: SkillSearchResult): boolean {
+  if (typeof result.content !== "string" || !result.content.trim()) return false;
+  if (result.mustLoadFull === true) return true;
+  if (typeof result.score === "number" && result.score >= AUTO_INJECT_BODY_MIN_SCORE) return true;
+  return false;
 }
 
 function formatSkillSuggestions(results: SkillSearchResult[], limit: number): string {
@@ -235,8 +301,13 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
   const lines: string[] = [];
   lines.push("## Suggested Skills");
   lines.push("");
+  lines.push(
+    "RANKING SHORTLIST — not skill execution. Load the full procedure first, then freestyle tools under its constraints.",
+  );
+  lines.push("");
   for (const r of items) {
     const key = r.key!.trim();
+    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : key;
     const desc = typeof r.description === "string" ? r.description.trim() : "";
     const origin =
       typeof r.library === "string" && r.library.trim() ? ` (from ${r.library.trim()})` : "";
@@ -244,11 +315,54 @@ function formatSkillSuggestions(results: SkillSearchResult[], limit: number): st
       Array.isArray(r.mcpServers) && r.mcpServers.length
         ? ` — requires: ${r.mcpServers.join(", ")}`
         : "";
+    const mustLoad = r.mustLoadFull !== false;
+
+    lines.push(`### \`${key}\`${origin}${desc ? `: ${desc}` : ""}${servers}`);
+    lines.push("");
+    if (mustLoad) {
+      lines.push("**Load full procedure before freestyle** (required):");
+    } else {
+      lines.push("**Load paths** (body may already be included):");
+    }
+    const lc = r.loadCommands;
+    if (Array.isArray(r.realpaths) && r.realpaths.length) {
+      for (const p of r.realpaths.slice(0, 3)) {
+        lines.push(`- native path: read \`${p}\``);
+      }
+    }
+    if (lc?.native) lines.push(`- native: ${lc.native}`);
+    else lines.push(`- native: \`/skill:${name}\` or read SKILL.md under harness skills dir`);
+    if (lc?.cli) lines.push(`- cli: \`${lc.cli}\``);
+    else lines.push(`- cli: \`sage library inspect skill get ${key}\``);
+    if (lc?.mcp) lines.push(`- mcp: ${lc.mcp}`);
+    else {
+      lines.push(
+        `- mcp body: \`sage_execute\` { "domain": "skills", "action": "get", "params": { "key": "${key}" } } (returns body; does not run steps)`,
+      );
+    }
     lines.push(
-      `- \`sage_execute\` { "domain": "skills", "action": "use", "params": { "key": "${key}" } }${origin}${desc ? `: ${desc}` : ""}${servers}`,
+      `- optional activate: \`sage_execute\` { "domain": "skills", "action": "use", "params": { "key": "${key}" } } (body/activate only — not a skill runner)`,
     );
+    if (lc?.fullSuggest) lines.push(`- full ranking body: \`${lc.fullSuggest}\``);
+    lines.push("");
+
+    if (shouldInjectSkillBody(r) && r.content) {
+      const body =
+        r.content.length > SUGGESTED_SKILL_BODY_MAX_CHARS
+          ? `${r.content.slice(0, SUGGESTED_SKILL_BODY_MAX_CHARS)}\n... (truncated; load full via paths above)`
+          : r.content;
+      lines.push(`--- Full skill procedure: ${key} ---`);
+      lines.push(body);
+      lines.push(`--- End: ${key} ---`);
+      lines.push("");
+    } else if (r.contentOmitted || mustLoad) {
+      lines.push(
+        `_Body omitted from ranking shortlist — load via a path above before treating the skill as used._`,
+      );
+      lines.push("");
+    }
   }
-  return lines.join("\n");
+  return lines.join("\n").trimEnd();
 }
 
 function extractSkillKeyFromExecuteParams(params: Record<string, unknown>): string {
@@ -313,56 +427,207 @@ const heartbeatSuggestState = {
   lastSuggestions: "",
 };
 
+function collectRoomIds(value: unknown, result = new Set<string>(), depth = 0): Set<string> {
+  if (depth > 5 || result.size >= 20 || value == null) return result;
+  if (typeof value === "string") return result;
+  if (Array.isArray(value)) {
+    for (const item of value) collectRoomIds(item, result, depth + 1);
+    return result;
+  }
+  if (typeof value !== "object") return result;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if ((["room", "roomId", "room_id", "id"].includes(key) || /room/i.test(key))
+      && typeof child === "string"
+      && child.length <= 512
+      && /^(global:|dao:|library:)/.test(child)) result.add(child);
+    else collectRoomIds(child, result, depth + 1);
+  }
+  return result;
+}
+
+const HEARTBEAT_SURFACE_TIMEOUT_MS = 5_000;
+const HEARTBEAT_SURFACE_MAX_CHARS = 6_000;
+
+async function heartbeatCall(
+  bridge: McpBridge,
+  args: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      bridge.callTool("sage_search", args),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`heartbeat surface timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function heartbeatJson(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  return serialized.length > HEARTBEAT_SURFACE_MAX_CHARS
+    ? `${serialized.slice(0, HEARTBEAT_SURFACE_MAX_CHARS - 1)}…`
+    : serialized;
+}
+
 async function gatherHeartbeatContext(
   bridge: McpBridge,
   logger: PluginLogger,
   maxChars: number,
+  coordinationController?: CoordinationController | null,
+  surfaceTimeoutMs = HEARTBEAT_SURFACE_TIMEOUT_MS,
 ): Promise<string> {
   const parts: string[] = [];
+  const pendingCardsPromise = coordinationController
+    ? coordinationController.listPending().catch((err) => {
+      logger.warn(`[heartbeat-context] coordination cards failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    })
+    : Promise.resolve([]);
+  const methodologyLessonsPromise = coordinationController
+    && typeof coordinationController.listMethodologyLessons === "function"
+    ? coordinationController.listMethodologyLessons(5).catch((err) => {
+      logger.warn(`[heartbeat-context] methodology lessons failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    })
+    : Promise.resolve([]);
+  const memoryNotesPromise = (async (): Promise<string[]> => {
+    try {
+      const notes: string[] = [];
+      const memoryDir = join(homedir(), ".openclaw", "memory");
+      if (!existsSync(memoryDir)) return notes;
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60_000);
+      const files = readdirSync(memoryDir).filter((file) => /^\d{4}-.*\.md$/.test(file)).sort().reverse();
+      for (const file of files.slice(0, 4)) {
+        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (dateMatch && new Date(dateMatch[1]) < twoDaysAgo) continue;
+        const content = (await loadTextFile(join(memoryDir, file))).trim();
+        if (content) notes.push(`--- ${file} ---\n${content}`);
+      }
+      return notes;
+    } catch (err) {
+      logger.warn(`[heartbeat-context] memory read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  })();
 
   // 1) Query RLM patterns
   try {
-    const raw = await bridge.callTool("sage_search", {
+    const raw = await heartbeatCall(bridge, {
       domain: "rlm",
       action: "list_patterns",
       params: {},
-    });
+    }, surfaceTimeoutMs);
     const json = extractJsonFromMcpResult(raw);
-    if (json) parts.push(`RLM patterns: ${JSON.stringify(json)}`);
+    if (json) parts.push(`RLM patterns: ${heartbeatJson(json)}`);
   } catch (err) {
     logger.warn(
       `[heartbeat-context] RLM query failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  // 2) Read recent daily notes (last 2 days)
-  try {
-    const memoryDir = join(homedir(), ".openclaw", "memory");
-    if (existsSync(memoryDir)) {
-      const now = new Date();
-      const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60_000);
-      const files = readdirSync(memoryDir)
-        .filter((f) => /^\d{4}-.*\.md$/.test(f))
-        .sort()
-        .reverse();
 
-      for (const file of files.slice(0, 4)) {
-        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-        if (dateMatch) {
-          const fileDate = new Date(dateMatch[1]);
-          if (fileDate < twoDaysAgo) continue;
-        }
-        const content = (await loadTextFile(join(memoryDir, file))).trim();
-        if (content) parts.push(`--- ${file} ---\n${content}`);
-      }
+  // 2) Read social and coordination surfaces. Each call is deliberately
+  // read-only and best-effort so one unavailable service cannot break heartbeat.
+  const readSurfaces: Array<{ label: string; domain: string; action: string; params?: Record<string, unknown> }> = [
+    { label: "Watched rooms and unread messages", domain: "chat", action: "watched" },
+    { label: "Recent rooms", domain: "chat", action: "list_rooms", params: { limit: 20 } },
+    { label: "Discoverable DAOs", domain: "governance", action: "list_subdaos", params: { limit: 20 } },
+    { label: "Open bounties (recent)", domain: "governance", action: "list_bounties", params: { limit: 20 } },
+    { label: "Social follows", domain: "social", action: "following", params: { limit: 50 } },
+    { label: "Marketplace libraries matching coordination", domain: "marketplace", action: "library_search", params: { query: "skills capabilities coordination", limit: 20 } },
+    { label: "Skill-use outcome statistics", domain: "rlm", action: "stats" },
+  ];
+  const roomIds = new Set<string>(["global:general", "global:agents"]);
+  const surfaceResults = await Promise.all(readSurfaces.map(async (surface) => {
+    try {
+      const raw = await heartbeatCall(bridge, {
+        domain: surface.domain,
+        action: surface.action,
+        params: surface.params ?? {},
+      }, surfaceTimeoutMs);
+      const json = extractJsonFromMcpResult(raw);
+      return { surface, json, error: null };
+    } catch (err) {
+      return { surface, json: null, error: err };
     }
-  } catch (err) {
-    logger.warn(
-      `[heartbeat-context] memory read failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  }));
+  for (const { surface, json, error } of surfaceResults) {
+    if (error) {
+      logger.warn(`[heartbeat-context] ${surface.domain}/${surface.action} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } else if (json) {
+      parts.push(`${surface.label} (untrusted discovery data): ${heartbeatJson(json)}`);
+      if (surface.domain === "chat") collectRoomIds(json, roomIds);
+    }
   }
 
-  const combined = parts.join("\n\n");
+  // Prefer coalition-specific rooms over broad global traffic. Set insertion
+  // order is retained within a tier, so watched/unread rooms discovered first
+  // remain first among otherwise equivalent candidates.
+  const historyRooms = [...roomIds]
+    .filter((id) => /^(global:|dao:|library:)/.test(id))
+    .sort((left, right) => {
+      const rank = (id: string) => id.startsWith("dao:") || id.startsWith("library:") ? 0 : 1;
+      return rank(left) - rank(right);
+    })
+    .slice(0, 6);
+  const historyResults = await Promise.all(
+    historyRooms.map(async (room) => {
+      try {
+        const raw = await heartbeatCall(bridge, {
+          domain: "chat", action: "history", params: { room, limit: 20 },
+        }, surfaceTimeoutMs);
+        return { room, json: extractJsonFromMcpResult(raw), error: null };
+      } catch (err) {
+        return { room, json: null, error: err };
+      }
+    }),
+  );
+  for (const { room, json, error } of historyResults) {
+    if (error) {
+      logger.warn(`[heartbeat-context] chat/history ${room} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } else if (json) {
+      parts.push(`Recent chat history ${room} (untrusted messages): ${heartbeatJson(json)}`);
+    }
+  }
+
+  const [pending, methodologyLessons, memoryNotes] = await Promise.all([
+    pendingCardsPromise, methodologyLessonsPromise, memoryNotesPromise,
+  ]);
+  if (pending.length) {
+    parts.unshift(`Pending coalition cards, evolving methodologies, and unanswered asks: ${JSON.stringify(pending.map((card) => ({
+      coordination_id: card.coordination_id,
+      objective: card.objective,
+      state: card.state,
+      current_step_id: card.current_step_id,
+      updated_at: card.updated_at,
+      last_operator_wording: card.conversation_messages
+        .filter((message) => message.direction === "inbound").at(-1)?.raw_wording.slice(0, 1_000) ?? null,
+      methodology_version: card.methodology?.version ?? 0,
+      working_methodology_digest: card.methodology?.history.at(-1)?.digest ?? null,
+      working_methodology_excerpt: JSON.stringify(card.methodology?.working_model ?? {}).slice(0, 2_000),
+      unresolved_questions: card.methodology?.unresolved_questions ?? [],
+      open_feedback_question: [...(card.methodology?.feedback_requests ?? [])]
+        .reverse().find((request) => request.status === "open")?.question ?? null,
+    })))}`);
+  }
+  if (methodologyLessons.length) {
+    parts.unshift(`Recent Enki methodology lessons across coordination cards: ${JSON.stringify(methodologyLessons)}`);
+  }
+  parts.push(...memoryNotes);
+
+  // Preserve at least a compact signal from every successful source instead of
+  // allowing one large chat or marketplace response to starve later sections.
+  const separators = Math.max(0, parts.length - 1) * 2;
+  const perSection = parts.length
+    ? Math.max(1, Math.floor(Math.max(0, maxChars - separators) / parts.length))
+    : maxChars;
+  const combined = parts.map((part) => part.length > perSection
+    ? `${part.slice(0, Math.max(0, perSection - 1))}…`
+    : part).join("\n\n");
   return combined.length > maxChars ? combined.slice(0, maxChars) : combined;
 }
 
@@ -584,6 +849,7 @@ type CorrelationState = {
   usedKeysToEmit: Set<string>;
   queryPreview: string;
   feedbackUseEmitted: boolean;
+  feedbackSkipEmitted: boolean;
   createdAt: number;
 };
 
@@ -802,7 +1068,30 @@ function extractEventTokenCount(event: any, phase: "input" | "output"): string {
   return String(value);
 }
 
-const SageDomain = Type.Union(
+// Search accepts the read-only "marketplace" discovery domain; execute does
+// not — marketplace has no write actions in this surface.
+const SageSearchDomain = Type.Union(
+  [
+    Type.Literal("prompts"),
+    Type.Literal("skills"),
+    Type.Literal("behaviors"),
+    Type.Literal("marketplace"),
+    Type.Literal("lineage"),
+    Type.Literal("builder"),
+    Type.Literal("governance"),
+    Type.Literal("chat"),
+    Type.Literal("social"),
+    Type.Literal("rlm"),
+    Type.Literal("library_sync"),
+    Type.Literal("security"),
+    Type.Literal("meta"),
+    Type.Literal("help"),
+    Type.Literal("external"),
+  ],
+  { description: "Sage domain namespace (search; marketplace and lineage are read-only discovery)" },
+);
+
+const SageExecuteDomain = Type.Union(
   [
     Type.Literal("prompts"),
     Type.Literal("skills"),
@@ -818,7 +1107,7 @@ const SageDomain = Type.Union(
     Type.Literal("help"),
     Type.Literal("external"),
   ],
-  { description: "Sage domain namespace" },
+  { description: "Sage domain namespace (execute; marketplace and lineage are search-only)" },
 );
 
 type SageCodeModeRequest = {
@@ -826,6 +1115,12 @@ type SageCodeModeRequest = {
   action: string;
   params?: Record<string, unknown>;
 };
+
+function discoveryOnlyDomainError(domain: string): string | null {
+  return domain === "marketplace" || domain === "lineage"
+    ? `Domain '${domain}' is discovery-only. Use sage_search instead.`
+    : null;
+}
 
 /**
  * Convert a single MCP JSON Schema property into a TypeBox type.
@@ -975,7 +1270,8 @@ const plugin = {
         : undefined;
 
     const autoInject = pluginCfg.autoInjectContext !== false;
-    const autoSuggest = pluginCfg.autoSuggestSkills === true;
+    const autoSuggest = resolveAutoSuggestSkills(pluginCfg);
+    const autoSuggestCooldownMs = resolveAutoSuggestCooldownMs(pluginCfg);
     const suggestLimit = clampInt(pluginCfg.suggestLimit, 3, 1, 10);
     const minPromptLen = clampInt(pluginCfg.minPromptLen, 12, 0, 500);
     const maxPromptBytes = clampInt(pluginCfg.maxPromptBytes, 16_384, 512, 65_536);
@@ -996,6 +1292,26 @@ const plugin = {
       500,
       16_000,
     );
+    const coordinationControllerEnabled = pluginCfg.coordinationControllerEnabled !== false;
+    const coordinationStateDir =
+      typeof pluginCfg.coordinationStateDir === "string" && pluginCfg.coordinationStateDir.trim()
+        ? pluginCfg.coordinationStateDir.trim()
+        : join(homedir(), ".openclaw", "sage-coordination");
+    const coordinationOperatorIds = Array.isArray(pluginCfg.coordinationOperatorIds)
+      ? new Set(pluginCfg.coordinationOperatorIds.map(String)
+        .map((id) => id.trim().replace(/^telegram:/i, ""))
+        .filter(Boolean))
+      : new Set<string>();
+    const coordinationController = coordinationControllerEnabled
+      ? new CoordinationController(
+        coordinationStateDir,
+        coordinationOperatorIds,
+        (message) => api.logger.warn(`[sage-coordination] ${message}`),
+      )
+      : null;
+    // The cold manifest always advertises sage_coordination. Register the tool
+    // even when execution is disabled so discovery contracts stay exact.
+    registerCoordinationTool(api, coordinationController);
 
     // Injection guard (opt-in)
     const injectionGuardEnabled = pluginCfg.injectionGuardEnabled === true;
@@ -1187,6 +1503,7 @@ const plugin = {
       reportedSkillKey: "",
       sessionId: "",
     };
+    const autoSuggestLastBySession = new Map<string, number>();
 
     const runCaptureHook = async (
       phase: "prompt" | "response",
@@ -1369,7 +1686,8 @@ const plugin = {
         if (!resolved) continue;
         const { result, key, paths } = resolved;
         correlatedKeys.set(key, new Set(paths));
-        displayResults.push(result);
+        // Attach verified realpaths so formatSkillSuggestions can enforce load paths.
+        displayResults.push({ ...result, realpaths: paths });
       }
 
       state.perCorrelation.set(correlationSession, {
@@ -1379,6 +1697,7 @@ const plugin = {
         usedKeysToEmit: new Set(),
         queryPreview,
         feedbackUseEmitted: false,
+        feedbackSkipEmitted: false,
         createdAt: Date.now(),
       });
       trimSkillUseCorrelations(baseSession, state, api.logger);
@@ -1507,13 +1826,20 @@ const plugin = {
       return "";
     };
 
+    /**
+     * Outcome only when there is a real terminal success signal.
+     * Mere SKILL.md read is not "passed" — that poisons the flywheel.
+     * Returns null to skip outcome emission (use feedback still records contact).
+     * agent_end success takes precedence over nearby tool-error noise.
+     */
     const outcomeStatusForEntry = (
       state: SkillUseHookSessionState,
       entry: UsedSkillReadEntry,
-    ): "passed" | "failed" => {
+    ): "passed" | "failed" | null => {
       if (state.agentEndSuccess === false) return "failed";
-      if (entry.nearbyToolError && state.agentEndSuccess === undefined) return "failed";
-      return "passed";
+      if (state.agentEndSuccess === true) return "passed";
+      if (entry.nearbyToolError) return "failed";
+      return null;
     };
 
     const flushTerminal = async (
@@ -1536,6 +1862,8 @@ const plugin = {
           ([correlationSession, correlation]) => ({
             correlationSession,
             feedbackUseEmitted: correlation.feedbackUseEmitted,
+            feedbackSkipEmitted: correlation.feedbackSkipEmitted,
+            suggestionsSurfaced: correlation.displayResults.length > 0,
             usedKeys: Array.from(correlation.usedKeysToEmit).filter(isValidSkillKey),
           }),
         );
@@ -1545,21 +1873,51 @@ const plugin = {
           status: outcomeStatusForEntry(state, entry),
         }));
 
-        for (const { correlationSession, feedbackUseEmitted, usedKeys } of correlationSnapshot) {
-          if (
-            feedbackUseEmitted ||
-            state.feedbackUseEmittedFor.has(correlationSession)
-          ) {
+        for (const {
+          correlationSession,
+          feedbackUseEmitted,
+          feedbackSkipEmitted,
+          suggestionsSurfaced,
+          usedKeys,
+        } of correlationSnapshot) {
+          if (usedKeys.length) {
+            if (
+              feedbackUseEmitted ||
+              state.feedbackUseEmittedFor.has(correlationSession)
+            ) {
+              continue;
+            }
+
+            const args = [
+              "suggest",
+              "feedback",
+              "use",
+              "--used",
+              ...usedKeys,
+              "--source",
+              "openclaw-hook",
+              "--session",
+              correlationSession,
+            ];
+            const result = await runOpenClawHookSage(args, correlationSession, 8_000);
+            if (result.code === 0) {
+              const liveCorrelation = state.perCorrelation.get(correlationSession);
+              if (liveCorrelation) liveCorrelation.feedbackUseEmitted = true;
+              state.feedbackUseEmittedFor.add(correlationSession);
+            } else {
+              api.logger.warn(
+                `[sage-skill-read] feedback use failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
+              );
+            }
             continue;
           }
-          if (!usedKeys.length) continue;
+
+          if (!suggestionsSurfaced || feedbackSkipEmitted) continue;
 
           const args = [
             "suggest",
             "feedback",
-            "use",
-            "--used",
-            ...usedKeys,
+            "skip",
             "--source",
             "openclaw-hook",
             "--session",
@@ -1568,11 +1926,10 @@ const plugin = {
           const result = await runOpenClawHookSage(args, correlationSession, 8_000);
           if (result.code === 0) {
             const liveCorrelation = state.perCorrelation.get(correlationSession);
-            if (liveCorrelation) liveCorrelation.feedbackUseEmitted = true;
-            state.feedbackUseEmittedFor.add(correlationSession);
+            if (liveCorrelation) liveCorrelation.feedbackSkipEmitted = true;
           } else {
             api.logger.warn(
-              `[sage-skill-read] feedback use failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
+              `[sage-skill-read] feedback skip failed for ${correlationSession}: ${result.stderr || `exit=${result.code}`}`,
             );
           }
         }
@@ -1580,6 +1937,8 @@ const plugin = {
         for (const { skillKey, queryPreview, status } of usedSkillSnapshot) {
           if (!isValidSkillKey(skillKey)) continue;
           if (state.reportedFor.has(skillKey)) continue;
+          // No real terminal success signal → do not invent passed from a SKILL.md read.
+          if (status == null) continue;
 
           const args = [
             "suggest",
@@ -1944,6 +2303,52 @@ const plugin = {
     const buildDynamicContext = async (prompt: string, baseSession?: string): Promise<string> => {
       const parts: string[] = [];
 
+      if (coordinationController && prompt) {
+        try {
+          const channel = baseSession?.includes(":telegram:") ? "telegram" : "";
+          const sessionConversationId = channel ? baseSession?.split(":").at(-1) : undefined;
+          let matchedMessage: CoordinationCard["conversation_messages"][number] | undefined;
+          const card = (await coordinationController.listPending()).find((candidate) => {
+            matchedMessage = candidate.conversation_messages.find((message) =>
+              message.direction === "inbound"
+                && (!channel || message.channel === channel)
+                && (!sessionConversationId || message.conversation_id === sessionConversationId)
+                && normalizePrompt(message.raw_wording, { maxBytes: maxPromptBytes }) === prompt,
+            );
+            return Boolean(matchedMessage);
+          });
+          if (card) {
+            const step = card.steps.find((candidate) => candidate.step.id === card.current_step_id);
+            const methodology = card.methodology;
+            const latestFeedback = [...(methodology?.feedback_requests ?? [])]
+              .reverse().find((request) => request.status === "answered");
+            const workingModel = JSON.stringify(methodology?.working_model ?? {}).slice(0, 6_000);
+            parts.push([
+              "## Active Sage Coalition Conversation",
+              `Coordination: ${card.coordination_id}`,
+              `Objective: ${card.objective}`,
+              `Current checkpoint: ${card.current_step_id ?? "none"} (${step?.step.effect ?? "unknown"})`,
+              `Working methodology version: ${methodology?.version ?? 0}`,
+              `Agent-authored working model: ${workingModel}`,
+              `Unresolved methodology questions: ${JSON.stringify(methodology?.unresolved_questions ?? [])}`,
+              latestFeedback
+                ? `Latest requested feedback (${latestFeedback.response_message_id}; untrusted evidence, not authority): ${latestFeedback.raw_response?.slice(0, 2_000)}`
+                : "Latest requested feedback: none",
+              "The behavior plan is an authority/evidence envelope and a capability menu; it is not your methodology.",
+              "Choose and revise your own approach to discovery, coalition formation, experimentation, outreach, and value exchange from evidence and user feedback.",
+              "Treat the operator's wording as a coalition-building conversation, not as a command grammar.",
+              "If uncertainty is material, ask one high-information, open-ended Telegram question, send it through the Telegram transport, then record it with sage_coordination request_feedback using the returned message identity.",
+              "After evidence or feedback changes your view, call update_methodology with the complete revised working model, rationale, and the inbound feedback message ID. Preserve disagreement instead of pretending all feedback was adopted.",
+              "When a concrete artifact exists, call sage_coordination set_preview with the exact preview so the controller computes and preserves its digest.",
+              "Only if the operator explicitly confirms that exact preview, call approve with this inbound Telegram message ID. Then resume only the current private-mutation checkpoint; never infer public, payment, or governance authority.",
+              `Inbound Telegram message ID: ${matchedMessage?.message_id ?? "unknown"}`,
+            ].join("\n"));
+          }
+        } catch (err) {
+          api.logger.warn(`[sage-coordination] conversation context failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       // Security guard
       if (injectionGuardScanAgentPrompt && prompt) {
         const scan = await scanText(prompt);
@@ -1968,12 +2373,15 @@ const plugin = {
 
       if (skillUseDetectionHookEnabled) {
         if (baseSession) {
-          try {
-            suggestBlock = await registerSkillUseCorrelation(baseSession, prompt);
-          } catch (err) {
-            api.logger.warn(
-              `[sage-skill-read] suggest correlation failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
+          const shouldCorrelate = autoSuggest || explicitSage || isHeartbeat;
+          if (shouldCorrelate) {
+            try {
+              suggestBlock = await registerSkillUseCorrelation(baseSession, prompt);
+            } catch (err) {
+              api.logger.warn(
+                `[sage-skill-read] suggest correlation failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
           }
         }
       } else if (isHeartbeat && heartbeatContextSuggest && sageBridge?.isReady()) {
@@ -1984,7 +2392,12 @@ const plugin = {
         if (cooldownElapsed) {
           api.logger.info("[heartbeat-context] Running full context-aware skill analysis");
           try {
-            const context = await gatherHeartbeatContext(sageBridge, api.logger, heartbeatContextMaxChars);
+            const context = await gatherHeartbeatContext(
+              sageBridge,
+              api.logger,
+              heartbeatContextMaxChars,
+              coordinationController,
+            );
             if (context) {
               suggestBlock = await searchSkillsForContext(sageBridge, context, suggestLimit, api.logger);
               heartbeatSuggestState.lastFullAnalysisTs = now;
@@ -2004,6 +2417,14 @@ const plugin = {
         (autoSuggest || explicitSage) &&
         sageBridge?.isReady()
       ) {
+        const shouldApplyCooldown = autoSuggest && !explicitSage;
+        const cooldownSession = baseSession || "__global__";
+        const now = Date.now();
+        if (shouldApplyCooldown && autoSuggestCooldownMs > 0) {
+          const lastSuggest = autoSuggestLastBySession.get(cooldownSession) ?? 0;
+          if (now - lastSuggest < autoSuggestCooldownMs) return parts.join("\n\n");
+          autoSuggestLastBySession.set(cooldownSession, now);
+        }
         try {
           const raw = await sageSearch({
             domain: "skills",
@@ -2042,10 +2463,55 @@ const plugin = {
       api.on("after_tool_call", handleSkillUseAfterToolCall);
     }
 
-    // Legacy OpenClaw hook names observed in older runtime builds.
+    const recordCoordinationInbound = async (event: any, ctx: any) => {
+      if (!coordinationController) return;
+      const metadata = event?.metadata && typeof event.metadata === "object" ? event.metadata : {};
+      const channel = String(
+        event?.channel || ctx?.channelId || metadata.originatingChannel || metadata.provider || "",
+      ).toLowerCase();
+      if (channel !== "telegram") return;
+      const conversationId = String(
+        event?.conversationId || ctx?.conversationId || metadata.originatingTo || metadata.to || "",
+      ).replace(/^telegram:/, "");
+      const messageId = String(event?.messageId || ctx?.messageId || metadata.messageId || "");
+      const senderId = String(
+        event?.senderId || ctx?.senderId || metadata.senderId || event?.from || "",
+      ).replace(/^telegram:/, "");
+      const content = typeof event?.content === "string"
+        ? event.content
+        : Array.isArray(event?.content)
+          ? event.content.map((part: any) => typeof part === "string" ? part : part?.text || "").join("\n")
+          : "";
+      if (!content && event?.content != null) {
+        api.logger.warn("[sage-coordination] Telegram inbound content had no preservable text");
+      }
+      if (conversationId && messageId && senderId && content) {
+        await coordinationController.recordInboundMessage({
+          channel,
+          conversation_id: conversationId,
+          message_id: messageId,
+          sender_id: senderId,
+          sender_name: typeof event?.senderName === "string"
+            ? event.senderName
+            : typeof metadata.senderName === "string" ? metadata.senderName : undefined,
+          raw_wording: content,
+        });
+      }
+    };
+
+    // The claiming hook is awaited before dispatch, closing the race between
+    // inbound persistence and before_prompt_build. It never claims the message.
+    api.on("inbound_claim", async (event: any, ctx: any) => {
+      await recordCoordinationInbound(event, ctx);
+      return { handled: false };
+    });
+
+    // Legacy OpenClaw hook name retained as a deduplicated fallback for older
+    // runtimes that do not emit inbound_claim.
     api.on("message_received", async (event: any, ctx: any) => {
       const sessionId = resolveOpenClawSessionId(event, ctx);
       capturePromptFromEvent("message_received", event, sessionId);
+      await recordCoordinationInbound(event, ctx);
     });
     api.on("agent_end", async (event: any, ctx: any) => {
       if (isSubagentLifecycleEvent(event, ctx)) return;
@@ -2153,6 +2619,103 @@ function registerStatusTool(api: PluginApi, sageToolCount: number) {
   );
 }
 
+function registerCoordinationTool(api: PluginApi, controller: CoordinationController | null) {
+  api.registerTool(
+    {
+      name: "sage_coordination",
+      label: "Sage: coordination controller",
+      description:
+        "Persist an OpenClaw-owned, agent-authored coordination methodology plus the Sage authority envelope. OpenClaw may revise its own approach from evidence and Telegram feedback; side effects still pause until an exact preview digest receives the declared authority.",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("create"), Type.Literal("get"), Type.Literal("list_pending"),
+          Type.Literal("list_methodology_lessons"),
+          Type.Literal("record_chat"), Type.Literal("set_preview"),
+          Type.Literal("update_methodology"), Type.Literal("request_feedback"),
+          Type.Literal("approve"), Type.Literal("start"), Type.Literal("complete"),
+          Type.Literal("fail"), Type.Literal("retry"), Type.Literal("recover"),
+        ]),
+        params: Type.Record(Type.String(), Type.Unknown()),
+      }),
+      execute: async (_toolCallId: string, raw: Record<string, unknown>) => {
+        if (!controller) return toToolResult({ error: "coordination_disabled" });
+        const action = String(raw.action || "");
+        const params = (raw.params && typeof raw.params === "object" ? raw.params : {}) as any;
+        try {
+          let result: unknown;
+          switch (action) {
+            case "create":
+              result = await controller.create(params);
+              break;
+            case "get":
+              result = await controller.get(String(params.coordination_id || ""));
+              break;
+            case "list_pending":
+              result = await controller.listPending();
+              break;
+            case "list_methodology_lessons":
+              result = await controller.listMethodologyLessons(Number(params.limit ?? 5));
+              break;
+            case "record_chat":
+              result = await controller.recordChatIdentity(
+                String(params.coordination_id || ""), params,
+              );
+              break;
+            case "set_preview":
+              result = await controller.setPreview(
+                String(params.coordination_id || ""), String(params.step_id || ""), params,
+              );
+              break;
+            case "update_methodology":
+              result = await controller.updateMethodology(
+                String(params.coordination_id || ""), params,
+              );
+              break;
+            case "request_feedback":
+              result = await controller.recordFeedbackRequest(
+                String(params.coordination_id || ""), params,
+              );
+              break;
+            case "approve":
+              result = await controller.approve(String(params.coordination_id || ""), params);
+              break;
+            case "start":
+              result = await controller.start(
+                String(params.coordination_id || ""), String(params.step_id || ""),
+              );
+              break;
+            case "complete":
+              result = await controller.complete(
+                String(params.coordination_id || ""), String(params.step_id || ""), params,
+              );
+              break;
+            case "fail":
+              result = await controller.fail(
+                String(params.coordination_id || ""), String(params.step_id || ""),
+                String(params.message || "step failed"),
+              );
+              break;
+            case "retry":
+              result = await controller.retry(
+                String(params.coordination_id || ""), String(params.step_id || ""),
+              );
+              break;
+            case "recover":
+              result = await controller.recover(String(params.coordination_id || ""), params);
+              break;
+            default:
+              throw new Error("unsupported_coordination_action");
+          }
+          return toToolResult(result);
+        } catch (error) {
+          return toToolResult({ error: error instanceof Error ? error.message : String(error) });
+        }
+      },
+    },
+    { name: "sage_coordination", optional: true },
+  );
+}
+
 function registerCodeModeTools(
   api: PluginApi,
   opts: {
@@ -2170,7 +2733,7 @@ function registerCodeModeTools(
       label: "Sage: search",
       description: "Sage code-mode search/discovery (domain/action routing)",
       parameters: Type.Object({
-        domain: SageDomain,
+        domain: SageSearchDomain,
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
@@ -2209,7 +2772,7 @@ function registerCodeModeTools(
       label: "Sage: execute",
       description: "Sage code-mode execute/mutations (domain/action routing)",
       parameters: Type.Object({
-        domain: SageDomain,
+        domain: SageExecuteDomain,
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
@@ -2218,6 +2781,13 @@ function registerCodeModeTools(
         const action = String(params.action ?? "");
         const skillKey =
           domain === "skills" && action === "use" ? extractSkillKeyFromExecuteParams(params) : "";
+
+        const discoveryOnlyError = discoveryOnlyDomainError(domain);
+        if (discoveryOnlyError) {
+          return toToolResult({
+            error: discoveryOnlyError,
+          });
+        }
 
         try {
           const p =
@@ -2295,18 +2865,57 @@ function registerCodeModeTools(
   );
 }
 
+export type OpenClawHookRejectOptions = {
+  sageBinary?: string;
+  sessionId: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+};
+
+export async function emitOpenClawHookSuggestionReject(
+  opts: OpenClawHookRejectOptions,
+) {
+  const sessionId = opts.sessionId.trim();
+  if (!sessionId) {
+    throw new TypeError("emitOpenClawHookSuggestionReject requires a non-blank sessionId");
+  }
+  return runCommand(
+    opts.sageBinary ?? "sage",
+    [
+      "suggest",
+      "feedback",
+      "reject",
+      "--source",
+      "openclaw-hook",
+      "--session",
+      sessionId,
+    ],
+    {
+      env: {
+        ...(opts.env ?? {}),
+        SAGE_SOURCE: "openclaw-hook",
+        SAGE_SESSION_ID: sessionId,
+      },
+      timeout: opts.timeoutMs ?? 8_000,
+    },
+  );
+}
+
 export default plugin;
 
 export const __test = {
   PKG_VERSION,
   SAGE_CONTEXT,
   normalizePrompt,
+  resolveAutoSuggestSkills,
+  resolveAutoSuggestCooldownMs,
   extractJsonFromMcpResult,
   parseSkillSuggestionResults,
   isValidSkillKey,
   isSubagentSessionKey,
   extractSkillKeyFromExecuteParams,
   formatSkillSuggestions,
+  shouldInjectSkillBody,
   resolveOpenClawSessionId,
   normalizeOpenClawToolName,
   extractPathsForTool,
@@ -2318,5 +2927,9 @@ export const __test = {
   soulStreamApplies,
   mcpSchemaToTypebox,
   jsonSchemaToTypebox,
+  SageSearchDomain,
+  SageExecuteDomain,
+  discoveryOnlyDomainError,
   enrichErrorMessage,
+  gatherHeartbeatContext,
 };

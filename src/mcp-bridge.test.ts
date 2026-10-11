@@ -9,6 +9,41 @@ import { McpBridge } from "./mcp-bridge.js";
 import plugin from "./index.js";
 import { __test } from "./index.js";
 
+test("plugin manifest declares every registered agent tool contract", () => {
+  const manifest = JSON.parse(readFileSync(resolve(new URL("..", import.meta.url).pathname, "openclaw.plugin.json"), "utf8"));
+  assert.deepEqual(
+    [...manifest.contracts.tools].sort(),
+    ["sage_coordination", "sage_execute", "sage_search", "sage_status"],
+  );
+});
+
+test("plugin cold manifest activates mixed tools, hooks, and services at startup", () => {
+  const packageRoot = resolve(new URL("..", import.meta.url).pathname);
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "openclaw.plugin.json"), "utf8"));
+  assert.equal(manifest.activation?.onStartup, true);
+  const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  assert.deepEqual(packageJson.openclaw?.runtimeExtensions, ["./dist/index.js"]);
+});
+
+test("cold sage_coordination contract remains registered when controller execution is disabled", async () => {
+  let coordinationTool: any;
+  plugin.register({
+    id: "test",
+    name: "test",
+    pluginConfig: { coordinationControllerEnabled: false },
+    logger: { info() {}, warn() {}, error() {} },
+    registerTool(tool: any) {
+      if (tool?.name === "sage_coordination") coordinationTool = tool;
+    },
+    registerService() {},
+    on() {},
+    registerHook() {},
+  } as any);
+  assert.ok(coordinationTool);
+  const result = await coordinationTool.execute("disabled-test", { action: "list_pending", params: {} });
+  assert.equal(result.details?.error, "coordination_disabled");
+});
+
 function candidateSageDebugBinDirs(): string[] {
   const here = resolve(new URL("..", import.meta.url).pathname);
   const candidates = [
@@ -263,6 +298,40 @@ test("jsonSchemaToTypebox handles single enum value as literal", () => {
   assert.equal(result.const, "only_value");
 });
 
+test("SageSearchDomain union accepts read-only marketplace and lineage domains", () => {
+  const schema = __test.SageSearchDomain as any;
+  assert.ok(Array.isArray(schema.anyOf), "SageSearchDomain should compile to a union (anyOf)");
+  const literals = schema.anyOf.map((v: any) => v.const);
+  assert.ok(literals.includes("marketplace"), "search domain union should include marketplace");
+  assert.ok(literals.includes("lineage"), "search domain union should include lineage");
+  assert.ok(literals.includes("skills"), "search domain union should still include skills");
+  assert.ok(literals.includes("builder"), "search domain union should still include builder");
+});
+
+test("SageExecuteDomain union rejects read-only marketplace and lineage domains", () => {
+  const schema = __test.SageExecuteDomain as any;
+  assert.ok(Array.isArray(schema.anyOf), "SageExecuteDomain should compile to a union (anyOf)");
+  const literals = schema.anyOf.map((v: any) => v.const);
+  assert.ok(
+    !literals.includes("marketplace"),
+    "execute domain union must NOT include marketplace (read-only slice)",
+  );
+  assert.ok(
+    !literals.includes("lineage"),
+    "execute domain union must NOT include lineage (read-only slice)",
+  );
+  assert.ok(literals.includes("skills"), "execute domain union should still include skills");
+});
+
+test("runtime guard rejects schema-bypassed lineage execute requests", () => {
+  assert.equal(
+    __test.discoveryOnlyDomainError("lineage"),
+    "Domain 'lineage' is discovery-only. Use sage_search instead.",
+  );
+  assert.equal(__test.discoveryOnlyDomainError("marketplace"), "Domain 'marketplace' is discovery-only. Use sage_search instead.");
+  assert.equal(__test.discoveryOnlyDomainError("skills"), null);
+});
+
 // ── P2: Error enrichment ─────────────────────────────────────────────
 
 test("enrichErrorMessage adds wallet hint for wallet errors", () => {
@@ -311,7 +380,7 @@ test("SAGE_CONTEXT includes discovery affordance and stays thin", () => {
   assert.ok(ctx.includes("sage_execute"), "should mention sage_execute");
   assert.ok(ctx.includes("sage_status"), "should mention sage_status");
   assert.ok(ctx.includes("@sage"), "should describe explicit richer-discovery trigger");
-  assert.ok(ctx.includes("Ordinary prompts should stay quiet"), "should encode quiet-by-default posture");
+  assert.ok(ctx.includes("Skill suggestions may surface automatically"), "should encode auto-suggest posture");
   assert.ok(Buffer.byteLength(ctx, "utf8") < 1400, "stable card should remain compact");
   assert.ok(!ctx.includes("Wallet and auth troubleshooting"), "stable context should not preload auth manual");
   assert.ok(!ctx.includes("Collaboration Posture"), "stable context should not preload collaboration manual");
@@ -341,7 +410,15 @@ test("soulStreamApplies gates on DAO, non-generic library id, and narrow governa
   }
 });
 
-test("before_prompt_build measures normal prompts and omits unsolicited suggestions by default", async () => {
+test("default config has ordinary prompt skill suggestions enabled", () => {
+  assert.equal(__test.resolveAutoSuggestSkills({}), true);
+  assert.equal(__test.resolveAutoSuggestSkills({ autoSuggestSkills: false }), false);
+  assert.equal(__test.resolveAutoSuggestCooldownMs({}), 20_000);
+  assert.equal(__test.resolveAutoSuggestCooldownMs({ autoSuggestCooldownMs: 0 }), 0);
+  assert.equal(__test.resolveAutoSuggestCooldownMs({ autoSuggestCooldownMs: 50 }), 50);
+});
+
+test("before_prompt_build measures normal prompts without a ready bridge", async () => {
   const fake = createFakeSageCli();
   try {
     const hook = withEnv({ SAGE_CAPTURE_HOOKS: "0" }, () =>
@@ -362,7 +439,7 @@ test("before_prompt_build measures normal prompts and omits unsolicited suggesti
     }
 
     const normal = measurements[0];
-    assert.equal(normal.hasSuggestedSkills, false, "normal prompt should not get suggestions");
+    assert.equal(normal.hasSuggestedSkills, false, "normal prompt cannot get suggestions without a ready bridge");
     assert.ok(normal.stable.includes("Sage (Code Mode)"), "normal prompt keeps compact affordance");
     assert.ok(!normal.stable.includes("### Key Commands"), "identity block should not include command list");
     assert.ok(!normal.stable.includes("Distribution ladder"), "identity block should not duplicate protocol manual");
@@ -547,7 +624,7 @@ test("OpenClaw plugin registers before_prompt_build hook and returns context blo
   );
 });
 
-test("formatSkillSuggestions formats stable markdown", () => {
+test("formatSkillSuggestions formats load-first ranking shortlist", () => {
   const out = __test.formatSkillSuggestions(
     [
       {
@@ -556,6 +633,13 @@ test("formatSkillSuggestions formats stable markdown", () => {
         description: "Recon, scanning, API testing",
         source: "installed",
         mcpServers: ["zap"],
+        mustLoadFull: true,
+        loadCommands: {
+          native: "/skill:Bug Bounty or read SKILL.md",
+          cli: "sage library inspect skill get bug-bounty",
+          mcp: "get_skill or use_skill (returns body; does not run steps)",
+        },
+        realpaths: ["/home/user/.agents/skills/bug-bounty/SKILL.md"],
       },
       { key: "", name: "skip" },
     ],
@@ -563,11 +647,60 @@ test("formatSkillSuggestions formats stable markdown", () => {
   );
 
   assert.ok(out.includes("## Suggested Skills"));
-  assert.ok(out.includes("`sage_execute`"));
+  assert.ok(out.includes("RANKING SHORTLIST"));
+  assert.ok(out.includes("Load full procedure before freestyle"));
+  assert.ok(out.includes("native path: read `/home/user/.agents/skills/bug-bounty/SKILL.md`"));
+  assert.ok(out.includes("sage library inspect skill get bug-bounty"));
   assert.ok(out.includes('"domain": "skills"'));
-  assert.ok(out.includes('"action": "use"'));
+  assert.ok(out.includes('"action": "use"') || out.includes('"action": "get"'));
   assert.ok(out.includes('"key": "bug-bounty"'));
   assert.ok(out.includes("requires: zap"));
+});
+
+test("formatSkillSuggestions injects high-score skill body", () => {
+  const out = __test.formatSkillSuggestions(
+    [
+      {
+        key: "code-audit",
+        name: "code-audit",
+        mustLoadFull: true,
+        score: 90,
+        content: "# Code Audit\n\nStep 1: inventory\nStep 2: review",
+      },
+    ],
+    1,
+  );
+  assert.ok(out.includes("--- Full skill procedure: code-audit ---"));
+  assert.ok(out.includes("Step 1: inventory"));
+});
+
+test("parseSkillSuggestionResults preserves loadCommands and mustLoadFull", () => {
+  const parsed = __test.parseSkillSuggestionResults(
+    JSON.stringify({
+      results: [
+        {
+          key: "code-audit",
+          name: "code-audit",
+          type: "skill",
+          entryKind: "skill",
+          description: "Audit code",
+          mustLoadFull: true,
+          loadCommands: {
+            native: "/skill:code-audit",
+            cli: "sage library inspect skill get code-audit",
+          },
+          score: 80,
+          mcp_servers: ["semgrep"],
+        },
+      ],
+    }),
+  );
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].key, "code-audit");
+  assert.equal(parsed[0].mustLoadFull, true);
+  assert.equal(parsed[0].loadCommands?.cli, "sage library inspect skill get code-audit");
+  assert.deepEqual(parsed[0].mcpServers, ["semgrep"]);
+  assert.equal(parsed[0].score, 80);
 });
 
 test("OpenClaw injectionGuard blocks dangerous execute payload (optional e2e)", async () => {
