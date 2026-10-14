@@ -857,6 +857,7 @@ type SkillUseHookSessionState = {
   perCorrelation: Map<string, CorrelationState>;
   usedSkills: Map<string, UsedSkillReadEntry>;
   reportedFor: Set<string>;
+  pendingLoads: Set<Promise<void>>;
   feedbackUseEmittedFor: Set<string>;
   toolCallIndex: number;
   turnCounter: number;
@@ -879,6 +880,7 @@ function getOrCreateSkillUseSessionState(
       perCorrelation: new Map(),
       usedSkills: new Map(),
       reportedFor: new Set(),
+      pendingLoads: new Set(),
       feedbackUseEmittedFor: new Set(),
       toolCallIndex: 0,
       turnCounter: 0,
@@ -1740,6 +1742,21 @@ const plugin = {
       for (const { skillKey, correlationSession } of matches) {
         const correlation = state.perCorrelation.get(correlationSession);
         if (!correlation) continue;
+        if (!correlation.usedKeysToEmit.has(skillKey)) {
+          const pending = runOpenClawHookSage(
+            ["suggest", "load-signal", skillKey, "--via", "read",
+              "--source", "openclaw-hook", "--session", correlationSession],
+            correlationSession,
+          ).then((result) => {
+            if (result.code !== 0) {
+              api.logger.warn(`[sage-skill-read] load signal failed for ${skillKey}: ${result.stderr || `exit=${result.code}`}`);
+            }
+          }).catch((err) => {
+            api.logger.warn(`[sage-skill-read] load signal failed for ${skillKey}: ${err instanceof Error ? err.message : String(err)}`);
+          });
+          state.pendingLoads.add(pending);
+          void pending.finally(() => state.pendingLoads.delete(pending));
+        }
         correlation.usedKeysToEmit.add(skillKey);
 
         const existing = state.usedSkills.get(skillKey);
@@ -1800,7 +1817,12 @@ const plugin = {
       const paths = extractPathsForTool(toolName, params);
 
       if (READ_TOOLS.has(toolName)) {
-        for (const path of paths) handleSkillRead(state, path, toolCallIndex);
+        // A failed, ranged, or truncated read is not a complete procedure load.
+        const partial = (params.offset != null && params.offset !== 1) || params.limit != null ||
+          event?.result?.truncated === true || event?.result?.details?.truncation?.truncated === true;
+        if (!eventIndicatesToolError(event) && !partial) {
+          for (const path of paths) handleSkillRead(state, path, toolCallIndex);
+        }
       } else if (EDIT_TOOLS.has(toolName)) {
         for (const path of paths) handleSkillSelfEdit(state, path, toolCallIndex);
       }
@@ -1812,18 +1834,6 @@ const plugin = {
           }
         }
       }
-    };
-
-    const queryPreviewForEntry = (
-      state: SkillUseHookSessionState,
-      entry: UsedSkillReadEntry,
-    ): string => {
-      const sessions = entry.correlationSessions ?? new Set([entry.correlationSession ?? ""]);
-      for (const correlationSession of sessions) {
-        const preview = state.perCorrelation.get(correlationSession)?.queryPreview;
-        if (preview) return preview;
-      }
-      return "";
     };
 
     /**
@@ -1858,6 +1868,8 @@ const plugin = {
       if (state.flushing) return state.flushing;
 
       state.flushing = (async () => {
+        // Reads stay fire-and-forget; settlement waits for their bounded receipt writes.
+        await Promise.all(state.pendingLoads);
         const correlationSnapshot = Array.from(state.perCorrelation.entries()).map(
           ([correlationSession, correlation]) => ({
             correlationSession,
@@ -1867,11 +1879,17 @@ const plugin = {
             usedKeys: Array.from(correlation.usedKeysToEmit).filter(isValidSkillKey),
           }),
         );
-        const usedSkillSnapshot = Array.from(state.usedSkills.entries()).map(([skillKey, entry]) => ({
-          skillKey,
-          queryPreview: queryPreviewForEntry(state, entry),
-          status: outcomeStatusForEntry(state, entry),
-        }));
+        const usedSkillSnapshot = correlationSnapshot.flatMap(({ correlationSession, usedKeys }) =>
+          usedKeys.map((skillKey) => {
+            const entry = state.usedSkills.get(skillKey);
+            return {
+              skillKey,
+              correlationSession,
+              queryPreview: state.perCorrelation.get(correlationSession)?.queryPreview ?? "",
+              status: entry ? outcomeStatusForEntry(state, entry) : null,
+            };
+          }),
+        );
 
         for (const {
           correlationSession,
@@ -1892,8 +1910,7 @@ const plugin = {
               "suggest",
               "feedback",
               "use",
-              "--used",
-              ...usedKeys,
+              ...usedKeys.flatMap((key) => ["--used", key]),
               "--source",
               "openclaw-hook",
               "--session",
@@ -1934,9 +1951,10 @@ const plugin = {
           }
         }
 
-        for (const { skillKey, queryPreview, status } of usedSkillSnapshot) {
+        for (const { skillKey, correlationSession, queryPreview, status } of usedSkillSnapshot) {
           if (!isValidSkillKey(skillKey)) continue;
-          if (state.reportedFor.has(skillKey)) continue;
+          const reportKey = JSON.stringify([correlationSession, skillKey]);
+          if (state.reportedFor.has(reportKey)) continue;
           // No real terminal success signal → do not invent passed from a SKILL.md read.
           if (status == null) continue;
 
@@ -1950,13 +1968,13 @@ const plugin = {
             "--source",
             "openclaw-hook",
             "--session",
-            baseSession,
+            correlationSession,
             "--query-preview",
             queryPreview,
           ];
-          const result = await runOpenClawHookSage(args, baseSession, 8_000);
+          const result = await runOpenClawHookSage(args, correlationSession, 8_000);
           if (result.code === 0) {
-            state.reportedFor.add(skillKey);
+            state.reportedFor.add(reportKey);
           } else {
             api.logger.warn(
               `[sage-skill-read] feedback outcome failed for ${skillKey}: ${result.stderr || `exit=${result.code}`}`,

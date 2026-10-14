@@ -802,13 +802,14 @@ test("OpenClaw SKILL.md read detection emits one feedback-use process per correl
 
       assert.equal(useCalls.length, 1, "same-correlation skills should share one use process");
       assert.equal(skipCalls.length, 0, "used suggestions must not also emit skip");
-      assert.equal(useCalls[0].args.filter((arg) => arg === "--used").length, 1);
-      assert.deepEqual(useCalls[0].args.slice(0, 8), [
+      assert.equal(useCalls[0].args.filter((arg) => arg === "--used").length, 2);
+      assert.deepEqual(useCalls[0].args.slice(0, 9), [
         "suggest",
         "feedback",
         "use",
         "--used",
         "skill-a",
+        "--used",
         "skill-b",
         "--source",
         "openclaw-hook",
@@ -1028,6 +1029,64 @@ test("OpenClaw SKILL.md read credits the same skill across multiple correlations
     },
     { toolCallHookEnabled: true },
   );
+});
+
+test("OpenClaw load receipts precede feedback in every matching correlation scope", async () => {
+  await withSkillHookHarness(async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+    const skill = createSkillDir(tmp, "skill-a", { openclaw: true });
+    writeFileSync(suggestPath, JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }));
+    writeFileSync(statusPath, JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skill] } }));
+    for (const prompt of ["first task needs a skill", "second task needs a skill"]) {
+      await hooks.before_prompt_build({ prompt }, { sessionKey: "base-session" });
+    }
+    for (let i = 0; i < 2; i++) {
+      await hooks.after_tool_call(
+        { toolName: "Read", params: { path: join(skill, "SKILL.md") } },
+        { sessionKey: "base-session" },
+      );
+    }
+    await hooks.agent_end({ success: true }, { sessionKey: "base-session" });
+    await hooks.session_end({}, { sessionKey: "base-session" });
+    const calls = readFakeSageLog(logPath);
+    for (const turn of [1, 2]) {
+      const session = `base-session__turn_${turn}`;
+      const scoped = calls.filter(({ args }) => args[args.indexOf("--session") + 1] === session);
+      const loads = scoped.filter(({ args }) => args[1] === "load-signal");
+      assert.equal(loads.length, 1, "duplicate reads must not duplicate a receipt");
+      assert.deepEqual(loads[0].args, ["suggest", "load-signal", "skill-a", "--via", "read",
+        "--source", "openclaw-hook", "--session", session]);
+      const outcomes = scoped.filter(({ args }) => args[2] === "outcome");
+      assert.equal(outcomes.length, 1);
+      assert.equal(outcomes[0].args.at(-1), turn === 1 ? "first task needs a skill" : "second task needs a skill");
+      for (const call of scoped) {
+        assert.equal(call.env?.SAGE_SOURCE, "openclaw-hook");
+        assert.equal(call.env?.SAGE_SESSION_ID, session);
+      }
+      assert.ok(scoped.indexOf(loads[0]) < scoped.findIndex(({ args }) => args[2] === "use"));
+    }
+  }, { toolCallHookEnabled: true });
+});
+
+test("OpenClaw failed or partial reads do not mint receipts or use feedback", async () => {
+  await withSkillHookHarness(async ({ tmp, logPath, suggestPath, statusPath, hooks }) => {
+    const skill = createSkillDir(tmp, "skill-a", { openclaw: true });
+    writeFileSync(suggestPath, JSON.stringify({ results: [{ key: "skill-a", entryKind: "skill", type: "skill" }] }));
+    writeFileSync(statusPath, JSON.stringify({ "skill-a": { global_paths: [], project_paths: [skill] } }));
+    await hooks.before_prompt_build({ prompt: "this task needs a skill" }, { sessionKey: "base-session" });
+    for (const extra of [
+      { error: "read failed" },
+      { result: { isError: true } },
+      { params: { offset: 2 } },
+      { params: { limit: 1 } },
+      { result: { details: { truncation: { truncated: true } } } },
+    ]) {
+      await hooks.after_tool_call({ ...extra, toolName: "Read",
+        params: { path: join(skill, "SKILL.md"), ...extra.params } }, { sessionKey: "base-session" });
+    }
+    await hooks.agent_end({ success: true }, { sessionKey: "base-session" });
+    const calls = readFakeSageLog(logPath);
+    assert.equal(calls.some(({ args }) => args[1] === "load-signal" || args[2] === "use" || args[2] === "outcome"), false);
+  }, { toolCallHookEnabled: true });
 });
 
 test("OpenClaw SKILL.md self-edit suppression removes only the edited recent realpath", async () => {
@@ -1655,9 +1714,8 @@ test("registerSkillUseCorrelation continues caching when one sage skill status r
         ({ args }) => args[0] === "suggest" && args[1] === "feedback" && args[2] === "use",
       );
       assert.equal(useCalls.length, 1, "exactly one use spawn per correlation");
-      // Both surviving keys should appear after the --used flag in the variadic set.
-      // clap accepts repeated `--used` flags AND multiple positional values after one `--used`
-      // (per existing passing test at line 618-627).
+      // Both surviving keys must have explicit --used flags.
+      assert.equal(useCalls[0].args.filter((arg) => arg === "--used").length, 2);
       const argsAfterUsed = useCalls[0].args.slice(useCalls[0].args.indexOf("--used") + 1);
       const usedKeys = argsAfterUsed.slice(0, argsAfterUsed.indexOf("--source"));
       assert.ok(usedKeys.includes("skill-a"), "skill-a must be in --used set");

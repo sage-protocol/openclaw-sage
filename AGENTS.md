@@ -84,11 +84,12 @@ For SKILL.md detection:
 
 Terminal flush rules are part of the correctness contract:
 
-- Emit exactly one `sage suggest feedback use --used K1 K2 ... --source openclaw-hook --session <correlationSession>` process per non-empty correlation. Do not spawn one process per skill; the CLI consumes the correlation file once.
-- Emit `sage suggest feedback outcome <key> --status passed|failed --source openclaw-hook --session <baseSession> --query-preview <preview>` once per used skill.
+- Queue `sage suggest load-signal <key> --via read --source openclaw-hook --session <correlationSession>` only for successful complete reads. Wait for pending receipt writes before terminal feedback.
+- Emit exactly one `sage suggest feedback use --used K1 --used K2 ... --source openclaw-hook --session <correlationSession>` process per non-empty correlation. Do not spawn one process per skill; the CLI consumes the correlation file once.
+- Emit `sage suggest feedback outcome <key> --status passed|failed --source openclaw-hook --session <correlationSession> --query-preview <preview>` once per used skill and correlation, matching the suggestion and load receipt scope.
 - `nearbyToolError` is only a heuristic flag. Final status is failed when
-  `agent_end.success === false`, failed when success is unknown and the nearby
-  error flag is set, otherwise passed.
+  `agent_end.success === false`, passed when it is true, and failed when success
+  is unknown and the nearby error flag is set. Otherwise, omit the outcome.
 - Root terminal hooks clean up the in-memory session state after flush. Subagent
   lifecycle events must not flush or delete the parent/root accumulator.
 
@@ -128,7 +129,7 @@ SAGE_E2E_OPENCLAW=1 npm test --workspace packages/openclaw-sage
 The `SAGE_E2E_OPENCLAW=1` path uses a real local Sage binary/daemon state and
 asserts persistence, not just argv shape: `suggestion_captures.skills_used`
 contains the inferred used keys and `skill_execution` stores
-`source=openclaw-hook`, `session_id=<baseSession>`, status, and query preview.
+`source=openclaw-hook`, `session_id=<correlationSession>`, status, and query preview.
 
 ## Privy Login Recovery (Provider-Session Path)
 

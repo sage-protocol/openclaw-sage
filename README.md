@@ -240,19 +240,23 @@ realpaths after appending `/SKILL.md`. OpenClaw exposure paths such as
 `~/.openclaw/...` are preferred; otherwise all verified Sage-exposed paths are
 cached. A read counts only when the read realpath is in that expected set and
 the `SKILL.md` frontmatter `name:` matches its parent directory basename (or no
-frontmatter name is present).
+frontmatter name is present). Failed, ranged, and explicitly truncated reads do
+not count. A complete read queues `sage suggest load-signal <key> --via read
+--source openclaw-hook --session <baseSession>__turn_<N>`. Terminal feedback waits
+for these bounded receipt writes.
 
 At terminal flush, the hook emits exactly one use-feedback process for each
 non-empty correlation:
 
 ```bash
-sage suggest feedback use --used K1 K2 ... --source openclaw-hook --session <baseSession>__turn_<N>
+sage suggest feedback use --used K1 --used K2 ... --source openclaw-hook --session <baseSession>__turn_<N>
 ```
 
-Outcomes are emitted per used skill against the base session:
+Outcomes are emitted per used skill and correlation, in the same scope as the
+suggestion, load receipt, and use feedback:
 
 ```bash
-sage suggest feedback outcome <key> --status passed|failed --source openclaw-hook --session <baseSession> --query-preview <preview>
+sage suggest feedback outcome <key> --status passed|failed --source openclaw-hook --session <baseSession>__turn_<N> --query-preview <preview>
 ```
 
 This is a weaker inferred signal than explicit `sage_execute` use. Keep it
@@ -370,7 +374,7 @@ SAGE_E2E_OPENCLAW=1 npm test --workspace packages/openclaw-sage
 
 The gated e2e verifies persisted Sage data: correlated `suggestion_captures`
 receive all used keys, and `skill_execution` stores
-`source=openclaw-hook`, the base session id, status, and query preview.
+`source=openclaw-hook`, the correlation session id, status, and query preview.
 
 ## License
 

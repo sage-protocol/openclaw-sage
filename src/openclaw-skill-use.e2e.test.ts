@@ -149,11 +149,11 @@ test(
           query_preview: string;
         }>(
           dbPath,
-          `SELECT skill_key, source, status, session_id, query_preview FROM skill_execution WHERE source='openclaw-hook' AND session_id=${JSON.stringify(baseSession)} AND skill_key=${JSON.stringify(key)} ORDER BY timestamp DESC LIMIT 1`,
+          `SELECT skill_key, source, status, session_id, query_preview FROM skill_execution WHERE source='openclaw-hook' AND session_id=${JSON.stringify(correlationSession)} AND skill_key=${JSON.stringify(key)} ORDER BY timestamp DESC LIMIT 1`,
         );
         assert.equal(executionRows.length, 1);
         assert.equal(executionRows[0].source, "openclaw-hook");
-        assert.equal(executionRows[0].session_id, baseSession);
+        assert.equal(executionRows[0].session_id, correlationSession);
         assert.equal(executionRows[0].status, "passed");
         assert.match(executionRows[0].query_preview, /OpenClaw SKILL\.md read detection e2e/);
       },
