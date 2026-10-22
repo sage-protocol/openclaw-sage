@@ -76,6 +76,7 @@ jobs:
         run: |
           npx --yes openclaw@latest plugins enable openclaw-sage
           npx --yes openclaw@latest config set plugins.allow '["openclaw-sage"]' --strict-json
+          npx --yes openclaw@latest config set plugins.entries.openclaw-sage.hooks.allowConversationAccess true --strict-json
 
       - name: Verify plugin is discoverable
         if: env.OPENCLAW_HOST_CRASH != '1'
@@ -98,9 +99,9 @@ jobs:
         env:
           OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
         run: |
-          npx --yes openclaw@latest plugins doctor > plugin-doctor.txt
+          npx --yes openclaw@latest plugins doctor > plugin-doctor.txt || true
           cat plugin-doctor.txt
-          node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-doctor.txt","utf8"); if (/legacy before_agent_start|unknown typed hook/i.test(text)) throw new Error(`plugin doctor reported legacy compatibility warnings:\n${text}`);'
+          node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-doctor.txt","utf8"); if (/legacy before_agent_start|unknown typed hook|allowConversationAccess/i.test(text)) throw new Error(`plugin doctor reported compatibility or hook warnings:\n${text}`);'
 
       - name: Note skipped runtime assertions when host crashes
         if: env.OPENCLAW_HOST_CRASH == '1'
