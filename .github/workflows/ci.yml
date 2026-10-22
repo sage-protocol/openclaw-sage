@@ -53,7 +53,7 @@ jobs:
         run: |
           TAR_FILE=$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync("pack.json","utf8"))[0].filename)')
           set -o pipefail
-          npx --yes openclaw@latest plugins install "./${TAR_FILE}" 2>&1 | tee plugin-install.txt
+          npx --yes openclaw@latest plugins install --force --accept-capabilities "./${TAR_FILE}" 2>&1 | tee plugin-install.txt
           node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-install.txt","utf8"); if (/suspicious code pattern|dangerous code pattern/i.test(text)) throw new Error(`plugin install reported scan warnings:\n${text}`);'
 
       - name: Classify latest OpenClaw host state
