@@ -2844,7 +2844,11 @@ function registerCodeModeTools(
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
-      execute: async (_toolCallId: string, params: Record<string, unknown>, ctx?: unknown) => {
+      execute: async (
+        _toolCallId: string,
+        params: Record<string, unknown>,
+        ctx?: OpenClawHookContext,
+      ) => {
         const domain = String(params.domain ?? "");
         const action = String(params.action ?? "");
         const skillKey =
