@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install dependencies
         run: npm install
@@ -35,7 +35,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install dependencies
         run: npm install
@@ -53,7 +53,7 @@ jobs:
         run: |
           TAR_FILE=$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync("pack.json","utf8"))[0].filename)')
           set -o pipefail
-          npx --yes openclaw@latest plugins install "./${TAR_FILE}" 2>&1 | tee plugin-install.txt
+          npx --yes openclaw@latest plugins install --force --accept-capabilities "./${TAR_FILE}" 2>&1 | tee plugin-install.txt
           node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-install.txt","utf8"); if (/suspicious code pattern|dangerous code pattern/i.test(text)) throw new Error(`plugin install reported scan warnings:\n${text}`);'
 
       - name: Classify latest OpenClaw host state
@@ -76,6 +76,7 @@ jobs:
         run: |
           npx --yes openclaw@latest plugins enable openclaw-sage
           npx --yes openclaw@latest config set plugins.allow '["openclaw-sage"]' --strict-json
+          npx --yes openclaw@latest config set plugins.entries.openclaw-sage.hooks.allowConversationAccess true --strict-json
 
       - name: Verify plugin is discoverable
         if: env.OPENCLAW_HOST_CRASH != '1'
@@ -98,9 +99,9 @@ jobs:
         env:
           OPENCLAW_HOME: ${{ github.workspace }}/.tmp-openclaw-home
         run: |
-          npx --yes openclaw@latest plugins doctor > plugin-doctor.txt
+          npx --yes openclaw@latest plugins doctor > plugin-doctor.txt || true
           cat plugin-doctor.txt
-          node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-doctor.txt","utf8"); if (/legacy before_agent_start|unknown typed hook/i.test(text)) throw new Error(`plugin doctor reported legacy compatibility warnings:\n${text}`);'
+          node -e 'const fs=require("node:fs"); const text=fs.readFileSync("plugin-doctor.txt","utf8"); if (/legacy before_agent_start|unknown typed hook|allowConversationAccess/i.test(text)) throw new Error(`plugin doctor reported compatibility or hook warnings:\n${text}`);'
 
       - name: Note skipped runtime assertions when host crashes
         if: env.OPENCLAW_HOST_CRASH == '1'

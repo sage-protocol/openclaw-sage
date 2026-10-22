@@ -1666,6 +1666,123 @@ test("OpenClaw sage_execute drops non-canonical skill keys (P0 #2 defense-in-dep
   );
 });
 
+test("OpenClaw sage_execute isolates skillOutcomeState per session across interleaved sessions", async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-session-isolation-test-"));
+  const { binDir, scriptPath } = createCodeModeFakeSageBinary(tmp);
+  const logPath = join(tmp, "sage.log");
+  const pathSep = process.platform === "win32" ? ";" : ":";
+
+  await withPatchedEnv(
+    {
+      PATH: `${binDir}${pathSep}${process.env.PATH ?? ""}`,
+      SAGE_CAPTURE_HOOKS: "0",
+      SAGE_OPENCLAW_SECURITY_SCAN: "0",
+      FAKE_SAGE_LOG: logPath,
+    },
+    async () => {
+      const hooks: Record<string, any> = {};
+      const tools = new Map<string, any>();
+      const services: Array<{ id: string; start: Function; stop?: Function }> = [];
+      const logger = {
+        info: (_: string) => {},
+        warn: (_: string) => {},
+        error: (_: string) => {},
+      };
+
+      plugin.register({
+        id: "t",
+        name: "t",
+        pluginConfig: { sageBinary: scriptPath, autoInjectContext: false },
+        logger,
+        registerTool: (tool: any) => {
+          if (tool?.name) tools.set(tool.name, tool);
+        },
+        registerService: (svc: any) => {
+          services.push(svc);
+        },
+        on: (hook: string, handler: any) => {
+          hooks[hook] = handler;
+        },
+        registerHook: (hook: string, handler: any) => {
+          hooks[hook] = handler;
+        },
+      } as any);
+
+      const svc = services.find((service) => service.id === "sage-mcp-bridge");
+      assert.ok(svc, "expected sage-mcp-bridge service");
+      await svc.start({ config: {}, stateDir: tmp, logger });
+
+      try {
+        const executeTool = tools.get("sage_execute");
+        assert.ok(executeTool?.execute, "expected sage_execute tool");
+
+        // 1. Session A starts and uses skill-a
+        await hooks["before_prompt_build"]({ prompt: "task a" }, { sessionKey: "session-a" });
+        await executeTool.execute("call-a", {
+          domain: "skills",
+          action: "use",
+          params: { key: "skill-a" },
+        });
+
+        // 2. Session B interleaves, uses NO skill, and ends first
+        await hooks["before_prompt_build"]({ prompt: "task b" }, { sessionKey: "session-b" });
+        await hooks["session_end"]({}, { sessionKey: "session-b" });
+
+        // 3. Session C interleaves, uses skill-c, and ends
+        await hooks["before_prompt_build"]({ prompt: "task c" }, { sessionKey: "session-c" });
+        await executeTool.execute("call-c", {
+          domain: "skills",
+          action: "use",
+          params: { key: "skill-c" },
+        });
+        await hooks["session_end"]({}, { sessionKey: "session-c" });
+
+        // 4. Session A finally ends (and fires both agent_end and session_end)
+        await hooks["agent_end"]({ response: "done a" }, { sessionKey: "session-a" });
+        await hooks["session_end"]({}, { sessionKey: "session-a" });
+
+        await new Promise((r) => setTimeout(r, 200));
+        const entries = readFakeSageLog(logPath);
+        const outcomeCalls = entries.filter(
+          ({ args }) => args[0] === "suggest" && args[1] === "feedback" && args[2] === "outcome",
+        );
+
+        assert.equal(
+          outcomeCalls.length,
+          2,
+          `expected exactly 2 outcome calls (session-c and session-a, never session-b or duplicate), got: ${JSON.stringify(outcomeCalls)}`,
+        );
+        assert.deepEqual(outcomeCalls[0].args, [
+          "suggest",
+          "feedback",
+          "outcome",
+          "skill-c",
+          "--status",
+          "passed",
+          "--source",
+          "openclaw",
+          "--session",
+          "session-c",
+        ]);
+        assert.deepEqual(outcomeCalls[1].args, [
+          "suggest",
+          "feedback",
+          "outcome",
+          "skill-a",
+          "--status",
+          "passed",
+          "--source",
+          "openclaw",
+          "--session",
+          "session-a",
+        ]);
+      } finally {
+        if (svc.stop) await svc.stop({ config: {}, stateDir: tmp, logger });
+      }
+    },
+  );
+});
+
 test("registerSkillUseCorrelation continues caching when one sage skill status rejects (Promise.allSettled)", async () => {
   // P1 fix #4: allSettled semantics — one failing status fetch must not abort the whole batch.
   // Simulated by writing a status file that omits skill-b's entry (returns empty paths),
