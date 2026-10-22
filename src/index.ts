@@ -285,6 +285,102 @@ function parseSkillSuggestionResults(raw: unknown): SkillSearchResult[] {
   return skillResults;
 }
 
+export type ScanHookEvaluation = {
+  decision: "allow" | "warn" | "block";
+  reason?: string;
+  incomplete?: boolean;
+  scannerFailure?: boolean;
+};
+
+function resolveSecurityFailurePolicy(
+  configValue: unknown,
+  envValue: string | undefined,
+  fallbackMode: "warn" | "block" = "warn",
+): "warn" | "block" {
+  const raw =
+    typeof configValue === "string" && configValue.trim()
+      ? configValue.trim().toLowerCase()
+      : typeof envValue === "string" && envValue.trim()
+        ? envValue.trim().toLowerCase()
+        : "";
+  if (raw === "block") return "block";
+  if (raw === "warn") return "warn";
+  return fallbackMode;
+}
+
+function evaluateScanHookOutput(
+  result: { code: number | null; stdout: string; stderr: string },
+  failurePolicy: "warn" | "block" = "warn",
+): ScanHookEvaluation {
+  const trimmed = (result.stdout ?? "").trim();
+  let parsed: Record<string, unknown> | null = null;
+  if (trimmed) {
+    try {
+      const candidate = JSON.parse(trimmed);
+      if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+        parsed = candidate as Record<string, unknown>;
+      }
+    } catch {
+      parsed = null;
+    }
+  }
+
+  const rawDecision =
+    typeof parsed?.decision === "string" ? parsed.decision.trim().toLowerCase() : "";
+  const rawReason = typeof parsed?.reason === "string" ? parsed.reason.trim() : "";
+  const incomplete = parsed?.incomplete === true;
+
+  if (result.code === 0 && parsed) {
+    if (rawDecision === "allow") {
+      return { decision: "allow", ...(incomplete ? { incomplete: true } : {}) };
+    }
+    if (rawDecision === "warn") {
+      return {
+        decision: "warn",
+        reason: rawReason || "Sage security scan flagged this content.",
+        ...(incomplete ? { incomplete: true } : {}),
+      };
+    }
+    if (rawDecision === "block" || rawDecision === "deny") {
+      return {
+        decision: "block",
+        reason: rawReason || "Sage security blocked this action.",
+        ...(incomplete ? { incomplete: true } : {}),
+      };
+    }
+  }
+
+  if (parsed && (rawDecision === "block" || rawDecision === "deny")) {
+    return {
+      decision: "block",
+      reason: rawReason || "Sage security blocked this action.",
+      ...(incomplete ? { incomplete: true } : {}),
+    };
+  }
+
+  let detail = "unknown scanner failure";
+  if (rawDecision === "error") {
+    detail = rawReason ? `scan-hook error: ${rawReason}` : "scan-hook error";
+  } else if (result.code !== 0) {
+    detail =
+      result.code === null
+        ? "scan-hook timed out or terminated"
+        : `scan-hook exited with code ${result.code}`;
+  } else if (!trimmed) {
+    detail = "empty scan output";
+  } else if (!parsed) {
+    detail = "invalid scan output JSON";
+  } else {
+    detail = `unexpected scan decision '${rawDecision || "missing"}'`;
+  }
+
+  return {
+    decision: failurePolicy,
+    reason: `Sage security scan unavailable (${detail}).`,
+    scannerFailure: true,
+  };
+}
+
 function shouldInjectSkillBody(result: SkillSearchResult): boolean {
   if (typeof result.content !== "string" || !result.content.trim()) return false;
   if (result.mustLoadFull === true) return true;
@@ -1318,6 +1414,11 @@ const plugin = {
     // Injection guard (opt-in)
     const injectionGuardEnabled = pluginCfg.injectionGuardEnabled === true;
     const injectionGuardMode = pluginCfg.injectionGuardMode === "block" ? "block" : "warn";
+    const securityFailurePolicy = resolveSecurityFailurePolicy(
+      pluginCfg.securityFailurePolicy,
+      envGet("SAGE_SECURITY_FAILURE_POLICY"),
+      injectionGuardMode,
+    );
     const injectionGuardScanAgentPrompt = injectionGuardEnabled
       ? pluginCfg.injectionGuardScanAgentPrompt !== false
       : false;
@@ -2041,19 +2142,17 @@ const plugin = {
 
     const scanHookPayload = async (
       payload: unknown,
-    ): Promise<{ decision?: string; reason?: string } | null> => {
+    ): Promise<ScanHookEvaluation> => {
       const result = await runCommand(sageBinary, ["security", "scan-hook"], {
         env: { ...sageEnv, SAGE_SOURCE: "openclaw" },
         timeout: 5_000,
         stdin: JSON.stringify(payload),
       });
-      if (result.code !== 0 || !result.stdout) return null;
-      try {
-        const parsed = JSON.parse(result.stdout);
-        return typeof parsed === "object" && parsed ? (parsed as any) : null;
-      } catch {
-        return null;
+      const evaluation = evaluateScanHookOutput(result, securityFailurePolicy);
+      if (evaluation.scannerFailure) {
+        api.logger.warn(`[sage-security] ${evaluation.reason}`);
       }
+      return evaluation;
     };
 
     const warningPrefix = (reason: string): string => {
@@ -2275,9 +2374,20 @@ const plugin = {
             source: "openclaw.internal.command:new",
           },
         });
-        if (scan?.decision !== "block" || typeof scan.reason !== "string" || !scan.reason.trim()) return;
+        if (
+          (scan.decision !== "block" && scan.decision !== "warn") ||
+          typeof scan.reason !== "string" ||
+          !scan.reason.trim()
+        ) {
+          return;
+        }
 
-        const warning = warningPrefix(scan.reason.trim());
+        const reason = scan.reason.trim();
+        if (scan.decision === "block") {
+          event.blocked = true;
+          event.blockReason = reason;
+        }
+        const warning = warningPrefix(reason);
         if (typeof event.prompt === "string") event.prompt = `${warning}${event.prompt}`;
         else if (typeof event.input === "string") event.input = `${warning}${event.input}`;
         else if (typeof event.text === "string") event.text = `${warning}${event.text}`;
@@ -2308,7 +2418,13 @@ const plugin = {
             content: response,
           },
         });
-        if (scan?.decision !== "block" || typeof scan.reason !== "string" || !scan.reason.trim()) return;
+        if (
+          (scan.decision !== "block" && scan.decision !== "warn") ||
+          typeof scan.reason !== "string" ||
+          !scan.reason.trim()
+        ) {
+          return;
+        }
 
         const warning = warningPrefix(scan.reason.trim());
         if (typeof event.response === "string") event.response = `${warning}${event.response}`;
@@ -3010,4 +3126,6 @@ export const __test = {
   discoveryOnlyDomainError,
   enrichErrorMessage,
   gatherHeartbeatContext,
+  resolveSecurityFailurePolicy,
+  evaluateScanHookOutput,
 };

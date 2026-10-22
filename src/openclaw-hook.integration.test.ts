@@ -18,6 +18,21 @@ if (args[0] === "skill" && args[1] === "context") {
 }
 
 if (args[0] === "security" && args[1] === "scan-hook") {
+  if (process.env.FAKE_SAGE_SCAN_EMPTY === "1") {
+    process.exit(0);
+  }
+  if (process.env.FAKE_SAGE_SCAN_INVALID_JSON === "1") {
+    process.stdout.write("not-json");
+    process.exit(0);
+  }
+  if (process.env.FAKE_SAGE_SCAN_ERROR_DECISION === "1") {
+    process.stdout.write(JSON.stringify({ decision: "error", reason: "malformed payload" }));
+    process.exit(1);
+  }
+  if (process.env.FAKE_SAGE_SCAN_EXIT) {
+    process.exit(Number(process.env.FAKE_SAGE_SCAN_EXIT) || 1);
+  }
+
   let input = "";
   try {
     input = fs.readFileSync(0, "utf8");
@@ -35,8 +50,12 @@ if (args[0] === "security" && args[1] === "scan-hook") {
   const preBlocked = new RegExp("rm\\\\s+-rf\\\\s+/", "i").test(preText);
   const postWarn = /ignore\\s+previous\\s+instructions/i.test(postText);
 
-  if ((event === "PreToolUse" && preBlocked) || (event === "PostToolUse" && postWarn)) {
+  if (event === "PreToolUse" && preBlocked) {
     process.stdout.write(JSON.stringify({ decision: "block", reason: "fake scan match" }));
+  } else if (event === "PostToolUse" && postWarn) {
+    process.stdout.write(JSON.stringify({ decision: "warn", reason: "fake scan match" }));
+  } else {
+    process.stdout.write(JSON.stringify({ decision: "allow" }));
   }
   process.exit(0);
 }
@@ -1843,4 +1862,132 @@ test("registerSkillUseCorrelation continues caching when one sage skill status r
     },
     { toolCallHookEnabled: true },
   );
+});
+
+test("evaluateScanHookOutput requires explicit allow and routes failures through securityFailurePolicy", () => {
+  assert.deepEqual(
+    __test.evaluateScanHookOutput({ code: 0, stdout: '{"decision":"allow"}\n', stderr: "" }, "warn"),
+    { decision: "allow" },
+  );
+  assert.deepEqual(
+    __test.evaluateScanHookOutput(
+      { code: 0, stdout: '{"decision":"warn","reason":"incomplete","incomplete":true}', stderr: "" },
+      "warn",
+    ),
+    { decision: "warn", reason: "incomplete", incomplete: true },
+  );
+  assert.deepEqual(
+    __test.evaluateScanHookOutput(
+      { code: 0, stdout: '{"decision":"block","reason":"dangerous command"}', stderr: "" },
+      "warn",
+    ),
+    { decision: "block", reason: "dangerous command" },
+  );
+
+  // Empty stdout on exit 0 must NOT silently allow
+  const emptyWarn = __test.evaluateScanHookOutput({ code: 0, stdout: "", stderr: "" }, "warn");
+  assert.equal(emptyWarn.decision, "warn");
+  assert.equal(emptyWarn.scannerFailure, true);
+  assert.match(emptyWarn.reason ?? "", /empty scan output/);
+
+  const emptyBlock = __test.evaluateScanHookOutput({ code: 0, stdout: "   ", stderr: "" }, "block");
+  assert.equal(emptyBlock.decision, "block");
+  assert.equal(emptyBlock.scannerFailure, true);
+
+  // Nonzero exit code, invalid JSON, and decision="error" must fail closed under policy
+  const exitErr = __test.evaluateScanHookOutput({ code: 7, stdout: "", stderr: "boom" }, "block");
+  assert.equal(exitErr.decision, "block");
+  assert.equal(exitErr.scannerFailure, true);
+  assert.match(exitErr.reason ?? "", /exited with code 7/);
+
+  const invalidJson = __test.evaluateScanHookOutput(
+    { code: 0, stdout: "not-json", stderr: "" },
+    "warn",
+  );
+  assert.equal(invalidJson.decision, "warn");
+  assert.equal(invalidJson.scannerFailure, true);
+  assert.match(invalidJson.reason ?? "", /invalid scan output JSON/);
+
+  const errorDecision = __test.evaluateScanHookOutput(
+    { code: 1, stdout: '{"decision":"error","reason":"bad stdin"}', stderr: "" },
+    "block",
+  );
+  assert.equal(errorDecision.decision, "block");
+  assert.equal(errorDecision.scannerFailure, true);
+  assert.match(errorDecision.reason ?? "", /scan-hook error: bad stdin/);
+});
+
+test("OpenClaw command:new and command:stop do not fail open on empty or failing scan-hook output", async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), "openclaw-scan-failclosed-test-"));
+  try {
+    const { binDir } = createFakeSageBinary(tmp);
+    const pathSep = process.platform === "win32" ? ";" : ":";
+
+    // 1. Clean explicit allow leaves prompt and response untouched
+    await withPatchedEnv(
+      {
+        PATH: `${binDir}${pathSep}${process.env.PATH ?? ""}`,
+        SAGE_OPENCLAW_SECURITY_SCAN: "1",
+      },
+      async () => {
+        const hooks = registerRuntimeHooks({ sageBinary: resolve(tmp, "sage") });
+        const newEvent: any = { type: "command", action: "new", prompt: "benign prompt" };
+        await hooks["command:new"](newEvent);
+        assert.equal(newEvent.prompt, "benign prompt");
+        assert.equal(newEvent.blocked, undefined);
+
+        const stopEvent: any = { type: "command", action: "stop", response: "benign response" };
+        await hooks["command:stop"](stopEvent);
+        assert.equal(stopEvent.response, "benign response");
+      },
+    );
+
+    // 2. Empty stdout on exit 0 triggers securityFailurePolicy (warn by default, block when configured)
+    await withPatchedEnv(
+      {
+        PATH: `${binDir}${pathSep}${process.env.PATH ?? ""}`,
+        SAGE_OPENCLAW_SECURITY_SCAN: "1",
+        FAKE_SAGE_SCAN_EMPTY: "1",
+      },
+      async () => {
+        const warnHooks = registerRuntimeHooks({
+          sageBinary: resolve(tmp, "sage"),
+          securityFailurePolicy: "warn",
+        });
+        const warnEvent: any = { type: "command", action: "new", prompt: "benign prompt" };
+        await warnHooks["command:new"](warnEvent);
+        assert.ok(warnEvent.prompt.startsWith("[Sage Security Warning]"));
+        assert.match(warnEvent.prompt, /empty scan output/);
+        assert.equal(warnEvent.blocked, undefined);
+
+        const blockHooks = registerRuntimeHooks({
+          sageBinary: resolve(tmp, "sage"),
+          securityFailurePolicy: "block",
+        });
+        const blockEvent: any = { type: "command", action: "new", prompt: "benign prompt" };
+        await blockHooks["command:new"](blockEvent);
+        assert.ok(blockEvent.prompt.startsWith("[Sage Security Warning]"));
+        assert.equal(blockEvent.blocked, true);
+        assert.match(blockEvent.blockReason ?? "", /empty scan output/);
+      },
+    );
+
+    // 3. Nonzero exit code on command:stop surfaces warning instead of silent allow
+    await withPatchedEnv(
+      {
+        PATH: `${binDir}${pathSep}${process.env.PATH ?? ""}`,
+        SAGE_OPENCLAW_SECURITY_SCAN: "1",
+        FAKE_SAGE_SCAN_EXIT: "7",
+      },
+      async () => {
+        const hooks = registerRuntimeHooks({ sageBinary: resolve(tmp, "sage") });
+        const stopEvent: any = { type: "command", action: "stop", response: "tool response" };
+        await hooks["command:stop"](stopEvent);
+        assert.ok(stopEvent.response.startsWith("[Sage Security Warning]"));
+        assert.match(stopEvent.response, /exited with code 7/);
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
