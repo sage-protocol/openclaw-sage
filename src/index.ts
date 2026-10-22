@@ -1500,10 +1500,39 @@ const plugin = {
       lastPromptHash: "",
       lastPromptTs: 0,
     };
-    const skillOutcomeState = {
-      usedSkillKey: "",
-      reportedSkillKey: "",
-      sessionId: "",
+    type SessionSkillOutcomeState = {
+      usedSkillKey: string;
+      reportedSkillKey: string;
+      sessionId: string;
+      updatedAt: number;
+    };
+    const MAX_SKILL_OUTCOME_SESSIONS = 128;
+    const skillOutcomeBySession = new Map<string, SessionSkillOutcomeState>();
+    let lastObservedSessionId = "";
+    const rememberObservedSessionId = (sessionId?: string): void => {
+      if (sessionId && sessionId.trim() && !isSubagentSessionKey(sessionId)) {
+        lastObservedSessionId = sessionId.trim();
+      }
+    };
+    const recordSessionSkillUsed = (skillKey: string, explicitSessionId?: string): void => {
+      const targetSessionId = (
+        explicitSessionId ||
+        lastObservedSessionId ||
+        captureState.sessionId ||
+        ""
+      ).trim();
+      skillOutcomeBySession.delete(targetSessionId);
+      skillOutcomeBySession.set(targetSessionId, {
+        usedSkillKey: skillKey,
+        reportedSkillKey: "",
+        sessionId: targetSessionId,
+        updatedAt: Date.now(),
+      });
+      while (skillOutcomeBySession.size > MAX_SKILL_OUTCOME_SESSIONS) {
+        const oldestKey = skillOutcomeBySession.keys().next().value;
+        if (oldestKey === undefined) break;
+        skillOutcomeBySession.delete(oldestKey);
+      }
     };
     const autoSuggestLastBySession = new Map<string, number>();
 
@@ -1570,20 +1599,37 @@ const plugin = {
       return "";
     };
 
-    const flushSkillOutcome = (status: "passed" | "failed", sessionId?: string): void => {
-      const skillKey = skillOutcomeState.usedSkillKey;
-      if (!skillKey || skillOutcomeState.reportedSkillKey === skillKey) return;
-      const outcomeSessionId = sessionId || skillOutcomeState.sessionId;
+    const flushSkillOutcome = async (status: "passed" | "failed", sessionId?: string): Promise<void> => {
+      const normalizedSessionId = (sessionId ?? "").trim();
+      let entry = skillOutcomeBySession.get(normalizedSessionId);
+      if (
+        !entry &&
+        normalizedSessionId &&
+        skillOutcomeBySession.size === 1 &&
+        skillOutcomeBySession.has("")
+      ) {
+        const unattributed = skillOutcomeBySession.get("");
+        if (unattributed) {
+          skillOutcomeBySession.delete("");
+          unattributed.sessionId = normalizedSessionId;
+          skillOutcomeBySession.set(normalizedSessionId, unattributed);
+          entry = unattributed;
+        }
+      }
+      if (!entry) return;
+      const skillKey = entry.usedSkillKey;
+      if (!skillKey || entry.reportedSkillKey === skillKey) return;
+      const outcomeSessionId = normalizedSessionId || entry.sessionId;
+      entry.reportedSkillKey = skillKey;
 
-      void reportSkillOutcome(skillKey, status, outcomeSessionId)
-        .then(() => {
-          skillOutcomeState.reportedSkillKey = skillKey;
-        })
-        .catch((err) => {
-          api.logger.warn(
-            `[sage-skill-outcome] feedback failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
+      await reportSkillOutcome(skillKey, status, outcomeSessionId).catch((err) => {
+        if (entry && entry.usedSkillKey === skillKey) {
+          entry.reportedSkillKey = "";
+        }
+        api.logger.warn(
+          `[sage-skill-outcome] feedback failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
     };
 
     const runOpenClawHookSage = (
@@ -2109,7 +2155,7 @@ const plugin = {
         );
       });
 
-      flushSkillOutcome("passed", sessionId);
+      void flushSkillOutcome("passed", sessionId);
     };
 
     // Main sage MCP bridge
@@ -2137,13 +2183,14 @@ const plugin = {
             injectionGuardScanGetPrompt,
             injectionGuardMode,
             scanText,
-            onSkillUsed: (skillKey: string) => {
-              skillOutcomeState.usedSkillKey = skillKey;
-              skillOutcomeState.reportedSkillKey = "";
-              skillOutcomeState.sessionId = captureState.sessionId;
+            getActiveSessionId: () => lastObservedSessionId || captureState.sessionId,
+            onSkillUsed: (skillKey: string, explicitSessionId?: string) => {
+              recordSessionSkillUsed(skillKey, explicitSessionId);
             },
-            onSkillFailed: (skillKey: string) => {
-              void reportSkillOutcome(skillKey, "failed", captureState.sessionId).catch((outcomeErr: unknown) => {
+            onSkillFailed: (skillKey: string, explicitSessionId?: string) => {
+              const targetSessionId =
+                explicitSessionId || lastObservedSessionId || captureState.sessionId;
+              void reportSkillOutcome(skillKey, "failed", targetSessionId).catch((outcomeErr: unknown) => {
                 api.logger.warn(
                   `[sage-skill-outcome] feedback failed: ${outcomeErr instanceof Error ? outcomeErr.message : String(outcomeErr)}`,
                 );
@@ -2463,6 +2510,7 @@ const plugin = {
     // that other plugins build on (higher = runs first).
     api.on("before_prompt_build", async (event: any, ctx: any) => {
       const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
+      rememberObservedSessionId(sessionId);
       capturePromptFromEvent("before_prompt_build", event, sessionId);
       const prompt = normalizePrompt(extractEventPrompt(event), { maxBytes: maxPromptBytes });
 
@@ -2528,6 +2576,7 @@ const plugin = {
     // runtimes that do not emit inbound_claim.
     api.on("message_received", async (event: any, ctx: any) => {
       const sessionId = resolveOpenClawSessionId(event, ctx);
+      rememberObservedSessionId(sessionId);
       capturePromptFromEvent("message_received", event, sessionId);
       await recordCoordinationInbound(event, ctx);
     });
@@ -2540,7 +2589,7 @@ const plugin = {
     api.on("session_end", async (event: any, ctx: any) => {
       if (isSubagentLifecycleEvent(event, ctx)) return;
       const sessionId = resolveOpenClawSessionId(event, ctx, { allowEventFallback: false });
-      flushSkillOutcome("passed", sessionId);
+      await flushSkillOutcome("passed", sessionId);
       await flushTerminal(sessionId, event, { cleanupAfterFlush: true });
     });
     // Upstream emits dedicated subagent_spawned / subagent_ended hooks with
@@ -2741,8 +2790,9 @@ function registerCodeModeTools(
     injectionGuardScanGetPrompt: boolean;
     injectionGuardMode: "warn" | "block";
     scanText: (text: string) => Promise<SecurityScanResult | null>;
-    onSkillUsed: (skillKey: string) => void;
-    onSkillFailed: (skillKey: string) => void;
+    getActiveSessionId: () => string;
+    onSkillUsed: (skillKey: string, explicitSessionId?: string) => void;
+    onSkillFailed: (skillKey: string, explicitSessionId?: string) => void;
   },
 ) {
   api.registerTool(
@@ -2794,11 +2844,17 @@ function registerCodeModeTools(
         action: Type.String(),
         params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       }),
-      execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      execute: async (_toolCallId: string, params: Record<string, unknown>, ctx?: unknown) => {
         const domain = String(params.domain ?? "");
         const action = String(params.action ?? "");
         const skillKey =
           domain === "skills" && action === "use" ? extractSkillKeyFromExecuteParams(params) : "";
+        const explicitSessionId =
+          resolveOpenClawSessionId(
+            params?.params && typeof params.params === "object" ? params.params : params,
+            ctx,
+            { allowEventFallback: true },
+          ) || opts.getActiveSessionId();
 
         const discoveryOnlyError = discoveryOnlyDomainError(domain);
         if (discoveryOnlyError) {
@@ -2833,7 +2889,7 @@ function registerCodeModeTools(
           const result = await sageExecute({ domain, action, params: p });
 
           if (skillKey) {
-            opts.onSkillUsed(skillKey);
+            opts.onSkillUsed(skillKey, explicitSessionId);
           }
 
           if (opts.injectionGuardScanGetPrompt && domain === "prompts" && action === "get") {
@@ -2869,7 +2925,7 @@ function registerCodeModeTools(
           return toToolResult(result);
         } catch (err) {
           if (skillKey) {
-            opts.onSkillFailed(skillKey);
+            opts.onSkillFailed(skillKey, explicitSessionId);
           }
           const enriched = enrichErrorMessage(
             err instanceof Error ? err : new Error(String(err)),
