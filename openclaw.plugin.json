@@ -100,6 +100,11 @@
         "description": "Injection guard mode: warn or block (default: warn)",
         "enum": ["warn", "block"]
       },
+      "securityFailurePolicy": {
+        "type": "string",
+        "description": "Policy when sage security scan-hook fails, times out, or returns empty/invalid output: warn or block (default: warn)",
+        "enum": ["warn", "block"]
+      },
       "injectionGuardScanAgentPrompt": {
         "type": "boolean",
         "description": "Scan the prompt seen by before_prompt_build (default: true when enabled)"
