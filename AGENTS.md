@@ -96,7 +96,7 @@ Terminal flush rules are part of the correctness contract:
 Treat `openclaw-hook` as a weaker signal than explicit `openclaw` until the
 daemon/RLM weighting follow-up is in place. Do not make the hook default-on
 before the hard prerequisites in
-`plans/2026-05-11-001-feat-openclaw-skill-use-detection-plan.md` ship:
+the monorepo plan `docs/plans/2026-05-11-001-feat-openclaw-skill-use-detection-plan.md` ship:
 
 - D1: daemon-side weighting by `source` before feedback aggregation.
 - D2: daemon-side TTL sweeper for orphan correlation-id temp files.
